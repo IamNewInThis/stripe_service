@@ -22,7 +22,7 @@ export const createCheckoutSession = async (req, res) => {
             mode: 'subscription',
             line_items: [
                 {
-                    price: priceId, // ID del precio creado en el dashboard de Stripe
+                    price: priceId,
                     quantity: 1,
                 },
             ],
@@ -246,16 +246,32 @@ export const createPaymentSheetSession = async (req, res) => {
             metadata: paymentMetadata,
         });
 
-        console.log(`💳 PaymentIntent creado: ${paymentIntent.id} - Amount: ${amount} ${normalizedCurrency}`);
+        console.log(`💳 PaymentIntent creado: ${paymentIntent.id}`);
+        console.log(`👤 Customer: ${customer.id}`);
+        console.log(`🔑 Ephemeral Key created`);
+        console.log(`💰 Amount: ${amount} ${normalizedCurrency}`);
 
-        res.json({
+        const response = {
             paymentIntent: paymentIntent.client_secret,
             paymentIntentId: paymentIntent.id,
             ephemeralKey: ephemeralKey.secret,
             customer: customer.id,
             amount: paymentIntent.amount,
             currency: paymentIntent.currency,
-        });
+        };
+
+        // Validate all required fields are present
+        if (!response.paymentIntent || !response.ephemeralKey || !response.customer) {
+            console.error('❌ Missing required fields in response:', {
+                hasPaymentIntent: !!response.paymentIntent,
+                hasEphemeralKey: !!response.ephemeralKey,
+                hasCustomer: !!response.customer
+            });
+            throw new Error('Failed to generate all required payment data');
+        }
+
+        console.log('✅ All payment data generated successfully');
+        res.json(response);
     } catch (err) {
         console.error('Error creating payment sheet session:', err);
         res.status(500).json({
@@ -264,7 +280,3 @@ export const createPaymentSheetSession = async (req, res) => {
         });
     }
 };
-
-// @TODO: Agregar metodo de create subscripcion, con create client, primero se debe crear el cliente en stripe en caso de no existir,
-// Si existe el cliente, se selecciona el id del cliente de stripe, luego se crea la subscripcion con el id del cliente
-// Luego se debe crear los registros en supabase tabla subscriptions y payments
