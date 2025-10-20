@@ -3,6 +3,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+const MOBILE_STRIPE_API_VERSION = '2024-06-20';
 
 export const createCheckoutSession = async (req, res) => {
     try {
@@ -177,9 +178,9 @@ export const cancelSubscription = async (req, res) => {
  * Crear PaymentIntent para pagos nativos en React Native
  * Compatible con Google Pay, Apple Pay y tarjetas
  */
-export const createPaymentIntent = async (req, res) => {
+export const createPaymentSheetSession = async (req, res) => {
     try {
-        const { amount, currency = 'usd', userId, description, metadata = {} } = req.body;
+        const { amount, currency = 'usd', userId, email, description, metadata = {} } = req.body;
 
         // Validaciones
         if (!amount) {
@@ -192,34 +193,78 @@ export const createPaymentIntent = async (req, res) => {
             });
         }
 
-        // Crear PaymentIntent
+        const normalizedCurrency = currency.toLowerCase();
+        const customerMetadata = {
+            ...(userId ? { userId } : {}),
+        };
+        const paymentMetadata = {
+            ...(userId ? { userId } : { userId: 'guest' }),
+            ...metadata,
+        };
+
+        let customer;
+
+        if (userId) {
+            try {
+                const existingCustomers = await stripe.customers.search({
+                    query: `metadata['userId']:'${userId}'`,
+                    limit: 1,
+                });
+
+                if (existingCustomers.data.length > 0) {
+                    customer = existingCustomers.data[0];
+
+                    if (email && !customer.email) {
+                        await stripe.customers.update(customer.id, { email });
+                    }
+                }
+            } catch (searchError) {
+                console.warn('⚠️  Stripe customer search failed, creating new customer:', searchError.message);
+            }
+        }
+
+        if (!customer) {
+            customer = await stripe.customers.create({
+                email,
+                metadata: customerMetadata,
+            });
+        }
+
+        const ephemeralKey = await stripe.ephemeralKeys.create(
+            { customer: customer.id },
+            { apiVersion: MOBILE_STRIPE_API_VERSION }
+        );
+
         const paymentIntent = await stripe.paymentIntents.create({
             amount: Math.round(amount), // Asegurar que sea entero
-            currency: currency.toLowerCase(),
+            currency: normalizedCurrency,
+            customer: customer.id,
             description: description || 'Lumi Payment',
-            // Habilitar métodos de pago automáticos (incluye Google Pay, Apple Pay, tarjetas)
             automatic_payment_methods: {
                 enabled: true,
             },
-            metadata: {
-                userId: userId || 'guest',
-                ...metadata,
-            },
+            metadata: paymentMetadata,
         });
 
-        console.log(`💳 PaymentIntent creado: ${paymentIntent.id} - Amount: ${amount} ${currency}`);
+        console.log(`💳 PaymentIntent creado: ${paymentIntent.id} - Amount: ${amount} ${normalizedCurrency}`);
 
         res.json({
-            clientSecret: paymentIntent.client_secret,
+            paymentIntent: paymentIntent.client_secret,
             paymentIntentId: paymentIntent.id,
+            ephemeralKey: ephemeralKey.secret,
+            customer: customer.id,
             amount: paymentIntent.amount,
             currency: paymentIntent.currency,
         });
     } catch (err) {
-        console.error('Error creating payment intent:', err);
+        console.error('Error creating payment sheet session:', err);
         res.status(500).json({
-            error: 'Failed to create payment intent',
+            error: 'Failed to create payment sheet session',
             message: err.message
         });
     }
 };
+
+// @TODO: Agregar metodo de create subscripcion, con create client, primero se debe crear el cliente en stripe en caso de no existir,
+// Si existe el cliente, se selecciona el id del cliente de stripe, luego se crea la subscripcion con el id del cliente
+// Luego se debe crear los registros en supabase tabla subscriptions y payments
