@@ -3,13 +3,17 @@ import {
     handleWebhook,
     getSubscriptionStatus,
     cancelSubscription,
-    createPaymentSheetSession
+    createSubscriptionSession,
+    createSubscription
 } from '../controllers/stripeController.js';
 
 const router = express.Router();
 
-// Crear Payment Sheet (para pagos nativos con Google Pay/Apple Pay)
-router.post('/create-payment-sheet', createPaymentSheetSession);
+// Crear sesión para SetupIntent + PaymentSheet (suscripciones nativas)
+router.post('/create-subscription-session', createSubscriptionSession);
+
+// Crear suscripción y obtener PaymentIntent inicial
+router.post('/create-subscription', createSubscription);
 
 // Crear sesión de pago (para checkout web)
 
