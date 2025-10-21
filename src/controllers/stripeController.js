@@ -4,6 +4,85 @@ dotenv.config();
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const MOBILE_STRIPE_API_VERSION = '2024-06-20';
+const PRICE_IDS = {
+    monthly: process.env.STRIPE_PRICE_ID_MONTHLY,
+};
+
+const resolvePriceId = (planId, priceId) => {
+    if (priceId) {
+        return priceId;
+    }
+
+    if (!planId) {
+        throw new Error('planId or priceId is required');
+    }
+
+    const resolved = PRICE_IDS[planId];
+    if (!resolved) {
+        throw new Error(`Price ID not configured for plan '${planId}'`);
+    }
+    return resolved;
+};
+
+const buildCustomerMetadata = (userId, metadata = {}) => ({
+    ...(userId ? { userId } : {}),
+    ...metadata,
+});
+
+const extractInvoiceId = (invoice) => {
+    if (!invoice) return null;
+    if (typeof invoice === 'string') return invoice;
+    if (invoice.id) return invoice.id;
+    return null;
+};
+
+const ensureCustomerMetadata = async (customer, { email, userId }) => {
+    const needsUpdate =
+        (email && customer.email !== email) ||
+        (userId && customer.metadata?.userId !== userId);
+
+    if (needsUpdate) {
+        await stripe.customers.update(customer.id, {
+            ...(email ? { email } : {}),
+            metadata: {
+                ...(customer.metadata || {}),
+                ...(userId ? { userId } : {}),
+            },
+        });
+    }
+
+    return stripe.customers.retrieve(customer.id);
+};
+
+const findOrCreateCustomer = async ({ userId, email }) => {
+    let customer = null;
+
+    if (userId) {
+        try {
+            const existingCustomers = await stripe.customers.search({
+                query: `metadata['userId']:'${userId}'`,
+                limit: 1,
+            });
+
+            if (existingCustomers.data.length > 0) {
+                customer = existingCustomers.data[0];
+            }
+        } catch (searchError) {
+            console.warn('⚠️  Stripe customer search failed, creating new customer:', searchError.message);
+        }
+    }
+
+    if (!customer) {
+        customer = await stripe.customers.create({
+            email,
+            metadata: buildCustomerMetadata(userId),
+        });
+    } else {
+        customer = await ensureCustomerMetadata(customer, { email, userId });
+    }
+
+    return customer;
+};
 
 export const createCheckoutSession = async (req, res) => {
     try {
@@ -175,108 +254,145 @@ export const cancelSubscription = async (req, res) => {
 };
 
 /**
- * Crear PaymentIntent para pagos nativos en React Native
- * Compatible con Google Pay, Apple Pay y tarjetas
+ * Prepara sesión para SetupIntent + PaymentSheet (guardar método de pago)
  */
-export const createPaymentSheetSession = async (req, res) => {
+export const createSubscriptionSession = async (req, res) => {
     try {
-        const { amount, currency = 'usd', userId, email, description, metadata = {} } = req.body;
+        const { planId, priceId: priceIdOverride, userId, email, metadata = {} } = req.body;
 
-        // Validaciones
-        if (!amount) {
-            return res.status(400).json({ error: 'amount is required' });
+        let priceId;
+        try {
+            priceId = resolvePriceId(planId, priceIdOverride);
+        } catch (resolveError) {
+            return res.status(400).json({ error: resolveError.message });
         }
 
-        if (amount < 50) {
-            return res.status(400).json({ 
-                error: 'amount must be at least 50 cents (0.50 USD)' 
-            });
-        }
-
-        const normalizedCurrency = currency.toLowerCase();
-        const customerMetadata = {
-            ...(userId ? { userId } : {}),
-        };
-        const paymentMetadata = {
-            ...(userId ? { userId } : { userId: 'guest' }),
-            ...metadata,
-        };
-
-        let customer;
-
-        if (userId) {
-            try {
-                const existingCustomers = await stripe.customers.search({
-                    query: `metadata['userId']:'${userId}'`,
-                    limit: 1,
-                });
-
-                if (existingCustomers.data.length > 0) {
-                    customer = existingCustomers.data[0];
-
-                    if (email && !customer.email) {
-                        await stripe.customers.update(customer.id, { email });
-                    }
-                }
-            } catch (searchError) {
-                console.warn('⚠️  Stripe customer search failed, creating new customer:', searchError.message);
-            }
-        }
-
-        if (!customer) {
-            customer = await stripe.customers.create({
-                email,
-                metadata: customerMetadata,
-            });
-        }
-
+        const customer = await findOrCreateCustomer({ userId, email });
         const ephemeralKey = await stripe.ephemeralKeys.create(
             { customer: customer.id },
             { apiVersion: MOBILE_STRIPE_API_VERSION }
         );
 
-        const paymentIntent = await stripe.paymentIntents.create({
-            amount: Math.round(amount), // Asegurar que sea entero
-            currency: normalizedCurrency,
+        const setupIntent = await stripe.setupIntents.create({
             customer: customer.id,
-            description: description || 'Lumi Payment',
-            automatic_payment_methods: {
-                enabled: true,
-            },
-            metadata: paymentMetadata,
+            automatic_payment_methods: { enabled: true },
+            metadata: buildCustomerMetadata(userId, { planId, ...metadata }),
         });
 
-        console.log(`💳 PaymentIntent creado: ${paymentIntent.id}`);
-        console.log(`👤 Customer: ${customer.id}`);
-        console.log(`🔑 Ephemeral Key created`);
-        console.log(`💰 Amount: ${amount} ${normalizedCurrency}`);
+        res.json({
+            customerId: customer.id,
+            customerEmail: customer.email,
+            customerEphemeralKeySecret: ephemeralKey.secret,
+            setupIntentClientSecret: setupIntent.client_secret,
+            priceId,
+            planId,
+        });
+    } catch (err) {
+        console.error('Error creating subscription session:', err);
+        res.status(500).json({
+            error: 'Failed to create subscription session',
+            message: err.message,
+        });
+    }
+};
 
-        const response = {
-            paymentIntent: paymentIntent.client_secret,
-            paymentIntentId: paymentIntent.id,
-            ephemeralKey: ephemeralKey.secret,
-            customer: customer.id,
-            amount: paymentIntent.amount,
-            currency: paymentIntent.currency,
-        };
+/**
+ * Crea la suscripción en Stripe y prepara el PaymentIntent de la primera factura
+ */
+export const createSubscription = async (req, res) => {
+    try {
+        const { customerId, planId, priceId: priceIdOverride, userId, email, metadata = {} } = req.body;
 
-        // Validate all required fields are present
-        if (!response.paymentIntent || !response.ephemeralKey || !response.customer) {
-            console.error('❌ Missing required fields in response:', {
-                hasPaymentIntent: !!response.paymentIntent,
-                hasEphemeralKey: !!response.ephemeralKey,
-                hasCustomer: !!response.customer
-            });
-            throw new Error('Failed to generate all required payment data');
+        if (!customerId) {
+            return res.status(400).json({ error: 'customerId is required' });
         }
 
-        console.log('✅ All payment data generated successfully');
-        res.json(response);
+        let priceId;
+        try {
+            priceId = resolvePriceId(planId, priceIdOverride);
+        } catch (resolveError) {
+            return res.status(400).json({ error: resolveError.message });
+        }
+
+        const customer = await ensureCustomerMetadata(
+            await stripe.customers.retrieve(customerId),
+            { email, userId }
+        );
+
+        const paymentEphemeralKey = await stripe.ephemeralKeys.create(
+            { customer: customer.id },
+            { apiVersion: MOBILE_STRIPE_API_VERSION }
+        );
+
+        const subscription = await stripe.subscriptions.create({
+            customer: customer.id,
+            items: [
+                {
+                    price: priceId,
+                },
+            ],
+            payment_behavior: 'default_incomplete',
+            payment_settings: {
+                save_default_payment_method: 'on_subscription',
+            },
+            expand: ['latest_invoice.payment_intent'],
+            metadata: buildCustomerMetadata(userId, { planId, ...metadata }),
+        });
+
+        let paymentIntent = subscription.latest_invoice?.payment_intent || null;
+
+        if (paymentIntent && typeof paymentIntent === 'string') {
+            try {
+                paymentIntent = await stripe.paymentIntents.retrieve(paymentIntent);
+            } catch (intentError) {
+                console.warn('⚠️  Unable to expand payment intent directly:', intentError.message);
+                paymentIntent = null;
+            }
+        }
+
+        const latestInvoiceId = extractInvoiceId(subscription.latest_invoice);
+
+        if ((!paymentIntent || !paymentIntent.client_secret) && latestInvoiceId) {
+            try {
+                const latestInvoice = await stripe.invoices.retrieve(latestInvoiceId, {
+                    expand: ['payment_intent'],
+                });
+                paymentIntent = latestInvoice?.payment_intent || null;
+            } catch (invoiceError) {
+                console.warn('⚠️  Unable to retrieve subscription latest invoice:', invoiceError.message);
+            }
+        }
+
+        if (!paymentIntent || typeof paymentIntent === 'string') {
+            console.warn('ℹ️  Subscription created without immediate payment intent', {
+                subscriptionId: subscription.id,
+                latestInvoiceId,
+            });
+        }
+
+        const paymentIntentStatus = paymentIntent?.status || null;
+        const requiresAction = paymentIntentStatus
+            ? ['requires_action', 'requires_payment_method'].includes(paymentIntentStatus)
+            : false;
+
+        res.json({
+            subscriptionId: subscription.id,
+            subscriptionStatus: subscription.status,
+            customerId: customer.id,
+            planId,
+            priceId,
+            latestInvoiceId,
+            paymentIntentId: paymentIntent?.id || null,
+            paymentIntentStatus,
+            paymentIntentClientSecret: paymentIntent?.client_secret || null,
+            requiresAction,
+            customerEphemeralKeySecret: paymentEphemeralKey.secret,
+        });
     } catch (err) {
-        console.error('Error creating payment sheet session:', err);
+        console.error('Error creating subscription:', err);
         res.status(500).json({
-            error: 'Failed to create payment sheet session',
-            message: err.message
+            error: 'Failed to create subscription',
+            message: err.message,
         });
     }
 };
