@@ -1,6 +1,5 @@
 import express from 'express';
 import { 
-    createCheckoutSession, 
     handleWebhook,
     getSubscriptionStatus,
     cancelSubscription,
@@ -13,7 +12,6 @@ const router = express.Router();
 router.post('/create-payment-sheet', createPaymentSheetSession);
 
 // Crear sesión de pago (para checkout web)
-router.post('/create-session', createCheckoutSession);
 
 // Webhook (para recibir eventos de Stripe)
 // IMPORTANTE: Esta ruta debe usar express.raw() configurado en app.js
