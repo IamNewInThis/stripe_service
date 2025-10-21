@@ -4,7 +4,9 @@ import {
     getSubscriptionStatus,
     cancelSubscription,
     createSubscriptionSession,
-    createSubscription
+    getSubscriptionStatusByUserId,
+    createSubscription,
+    createCard,
 } from '../controllers/stripeController.js';
 
 const router = express.Router();
@@ -21,10 +23,16 @@ router.post('/create-subscription', createSubscription);
 // IMPORTANTE: Esta ruta debe usar express.raw() configurado en app.js
 router.post('/webhook', handleWebhook);
 
-// Obtener estado de suscripción
+// Obtener estado de suscripción en base al customerId de Stripe
 router.get('/subscription/:customerId', getSubscriptionStatus);
 
+//obtener estado de suscripción en base al id de supabase
+router.get("/subscription/user/:userId", getSubscriptionStatusByUserId);
+
 // Cancelar suscripción
-router.post('/subscription/:subscriptionId/cancel', cancelSubscription);
+router.post('/subscription/cancel/:subscriptionId', cancelSubscription);
+
+// Añadir tarjetas de crédito
+router.post('/create-card', createCard);
 
 export default router;

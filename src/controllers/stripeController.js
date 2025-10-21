@@ -25,8 +25,9 @@ const resolvePriceId = (planId, priceId) => {
   return resolved;
 };
 
-const buildCustomerMetadata = (userId, metadata = {}) => ({
+const buildCustomerMetadata = (userId, userName, metadata = {}) => ({
   ...(userId ? { userId } : {}),
+  ...(userName ? { userName: String(userName) } : {}),
   ...metadata,
 });
 
@@ -37,10 +38,11 @@ const extractInvoiceId = (invoice) => {
   return null;
 };
 
-const ensureCustomerMetadata = async (customer, { email, userId }) => {
+const ensureCustomerMetadata = async (customer, { email, userId, userName }) => {
   const needsUpdate =
     (email && customer.email !== email) ||
-    (userId && customer.metadata?.userId !== userId);
+    (userId && customer.metadata?.userId !== userId) ||
+    (userName && customer.metadata?.userName !== String(userName));
 
   if (needsUpdate) {
     await stripe.customers.update(customer.id, {
@@ -48,6 +50,7 @@ const ensureCustomerMetadata = async (customer, { email, userId }) => {
       metadata: {
         ...(customer.metadata || {}),
         ...(userId ? { userId } : {}),
+        ...(userName ? { userName: String(userName) } : {}),
       },
     });
   }
@@ -55,7 +58,7 @@ const ensureCustomerMetadata = async (customer, { email, userId }) => {
   return stripe.customers.retrieve(customer.id);
 };
 
-const findOrCreateCustomer = async ({ userId, email }) => {
+const findOrCreateCustomer = async ({ userId, email, userName }) => {
   let customer = null;
 
   if (userId) {
@@ -76,10 +79,11 @@ const findOrCreateCustomer = async ({ userId, email }) => {
   if (!customer) {
     customer = await stripe.customers.create({
       email,
+      name: userName,
       metadata: buildCustomerMetadata(userId),
     });
   } else {
-    customer = await ensureCustomerMetadata(customer, { email, userId });
+    customer = await ensureCustomerMetadata(customer, { email, userId, userName });
   }
 
   return customer;
@@ -229,6 +233,61 @@ export const getSubscriptionStatus = async (req, res) => {
   }
 };
 
+export const getSubscriptionStatusByUserId = async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    if (!userId) {
+      return res.status(400).json({ error: "userId is required" });
+    }
+
+    // 🔍 Buscar cliente por metadata['userId']
+    const customers = await stripe.customers.search({
+      query: `metadata['userId']:'${userId}'`,
+    });
+
+    if (customers.data.length === 0) {
+      return res.status(404).json({
+        error: "Customer not found for this userId",
+      });
+    }
+
+    const customer = customers.data[0];
+
+    // 🔄 Buscar suscripciones del cliente
+    const subscriptions = await stripe.subscriptions.list({
+      customer: customer.id,
+      status: "all",
+      limit: 1,
+    });
+
+    if (subscriptions.data.length === 0) {
+      return res.json({
+        hasSubscription: false,
+        message: "No active subscription found",
+      });
+    }
+
+    const subscription = subscriptions.data[0];
+
+    return res.json({
+      subscriptionId: subscription.id,
+      hasSubscription: true,
+      status: subscription.status,
+      currentPeriodEnd: subscription.current_period_end,
+      cancelAtPeriodEnd: subscription.cancel_at_period_end,
+      subscription: subscription,
+      stripeCustomerId: customer.id,
+    });
+  } catch (err) {
+    console.error("❌ Error getting subscription status by userId:", err);
+    return res.status(500).json({
+      error: "Failed to get subscription status",
+      message: err.message,
+    });
+  }
+};
+
 export const cancelSubscription = async (req, res) => {
   try {
     const { subscriptionId } = req.params;
@@ -256,10 +315,11 @@ export const cancelSubscription = async (req, res) => {
 
 /**
  * Prepara sesión para SetupIntent + PaymentSheet (guardar método de pago)
- */
+ */ 
 export const createSubscriptionSession = async (req, res) => {
   try {
     const { planId, priceId: priceIdOverride, userId, email, userName, metadata = {} } = req.body;
+
 
     let priceId;
     try {
@@ -296,6 +356,8 @@ export const createSubscriptionSession = async (req, res) => {
     });
   }
 };
+
+
 
 /**
  * Crea la suscripción en Stripe y prepara el PaymentIntent de la primera factura
@@ -468,3 +530,29 @@ export const createSubscription = async (req, res) => {
   }
 };
 
+export const createCard = async (req, res) => {
+  const { customerId, paymentMethodId, makeDefault } = req.body;
+
+  if (!customerId || !paymentMethodId) {
+    return res.status(400).json({ error: 'Missing required fields' });
+  }
+
+  try {
+    const paymentMethod = await stripe.paymentMethods.attach(paymentMethodId, {
+      customer: customerId,
+    });
+
+    if (makeDefault) {
+      await stripe.customers.update(customerId, {
+        invoice_settings: {
+          default_payment_method: paymentMethod.id,
+        },
+      });
+    }
+
+    res.status(200).json({ success: true, paymentMethod });
+  } catch (error) {
+    console.error('Error creating card:', error);
+    res.status(500).json({ error: 'Failed to create card', message: error.message });
+  }
+};
