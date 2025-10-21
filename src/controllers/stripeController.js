@@ -301,7 +301,15 @@ export const createSubscriptionSession = async (req, res) => {
  */
 export const createSubscription = async (req, res) => {
     try {
-        const { customerId, planId, priceId: priceIdOverride, userId, email, metadata = {} } = req.body;
+        const {
+            customerId,
+            planId,
+            priceId: priceIdOverride,
+            userId,
+            email,
+            setupIntentId,
+            metadata = {},
+        } = req.body;
 
         if (!customerId) {
             return res.status(400).json({ error: 'customerId is required' });
@@ -324,7 +332,43 @@ export const createSubscription = async (req, res) => {
             { apiVersion: MOBILE_STRIPE_API_VERSION }
         );
 
-        const subscription = await stripe.subscriptions.create({
+        let defaultPaymentMethodId = null;
+
+        if (setupIntentId) {
+            try {
+                const setupIntent = await stripe.setupIntents.retrieve(setupIntentId);
+                defaultPaymentMethodId = setupIntent.payment_method || null;
+            } catch (setupIntentError) {
+                console.warn('⚠️  Unable to retrieve setup intent for default payment method:', setupIntentError.message);
+            }
+        }
+
+        if (!defaultPaymentMethodId) {
+            try {
+                const paymentMethods = await stripe.paymentMethods.list({
+                    customer: customer.id,
+                    type: 'card',
+                    limit: 1,
+                });
+                defaultPaymentMethodId = paymentMethods.data[0]?.id || null;
+            } catch (paymentMethodsError) {
+                console.warn('⚠️  Unable to list customer payment methods:', paymentMethodsError.message);
+            }
+        }
+        
+        if (defaultPaymentMethodId) {
+            try {
+                await stripe.customers.update(customer.id, {
+                    invoice_settings: {
+                        default_payment_method: defaultPaymentMethodId,
+                    },
+                });
+            } catch (updateError) {
+                console.warn('⚠️  Unable to set default payment method on customer:', updateError.message);
+            }
+        }
+
+        let subscription = await stripe.subscriptions.create({
             customer: customer.id,
             items: [
                 {
@@ -332,8 +376,11 @@ export const createSubscription = async (req, res) => {
                 },
             ],
             payment_behavior: 'default_incomplete',
+            collection_method: 'charge_automatically',
+            ...(defaultPaymentMethodId ? { default_payment_method: defaultPaymentMethodId } : {}),
             payment_settings: {
                 save_default_payment_method: 'on_subscription',
+                payment_method_types: ['card'],
             },
             expand: ['latest_invoice.payment_intent'],
             metadata: buildCustomerMetadata(userId, { planId, ...metadata }),
@@ -363,12 +410,34 @@ export const createSubscription = async (req, res) => {
             }
         }
 
-        if (!paymentIntent || typeof paymentIntent === 'string') {
-            console.warn('ℹ️  Subscription created without immediate payment intent', {
-                subscriptionId: subscription.id,
-                latestInvoiceId,
-            });
+        let invoicePaymentStatus = null;
+
+        if ((!paymentIntent || typeof paymentIntent === 'string') && latestInvoiceId && defaultPaymentMethodId) {
+            try {
+                const paidInvoice = await stripe.invoices.pay(latestInvoiceId, {
+                    payment_method: defaultPaymentMethodId,
+                });
+                invoicePaymentStatus = paidInvoice.status;
+                if (paidInvoice.payment_intent) {
+                    paymentIntent =
+                        typeof paidInvoice.payment_intent === 'string'
+                            ? await stripe.paymentIntents.retrieve(paidInvoice.payment_intent)
+                            : paidInvoice.payment_intent;
+                }
+            } catch (payError) {
+                console.warn('⚠️  Unable to auto-pay invoice:', payError.message);
+            }
         }
+
+        subscription = await stripe.subscriptions.retrieve(subscription.id, {
+            expand: ['latest_invoice.payment_intent'],
+        });
+
+        paymentIntent =
+            paymentIntent ||
+            (subscription.latest_invoice?.payment_intent && typeof subscription.latest_invoice.payment_intent === 'string'
+                ? await stripe.paymentIntents.retrieve(subscription.latest_invoice.payment_intent)
+                : subscription.latest_invoice?.payment_intent || null);
 
         const paymentIntentStatus = paymentIntent?.status || null;
         const requiresAction = paymentIntentStatus
@@ -387,6 +456,7 @@ export const createSubscription = async (req, res) => {
             paymentIntentClientSecret: paymentIntent?.client_secret || null,
             requiresAction,
             customerEphemeralKeySecret: paymentEphemeralKey.secret,
+            invoiceStatus: invoicePaymentStatus || subscription.latest_invoice?.status || null,
         });
     } catch (err) {
         console.error('Error creating subscription:', err);
