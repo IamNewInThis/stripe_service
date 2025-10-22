@@ -1,5 +1,6 @@
 import Stripe from 'stripe';
 import dotenv from 'dotenv';
+import { upsertSubscription, recordPayment } from '../services/subscriptionService.js';
 dotenv.config();
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -154,37 +155,90 @@ export const handleWebhook = async (req, res) => {
       console.log(`✅ Checkout completado para usuario: ${session.metadata.userId}`);
       console.log(`   Session ID: ${session.id}`);
       console.log(`   Customer: ${session.customer}`);
-      // TODO: Aquí deberías actualizar tu base de datos (Supabase)
-      // para activar la suscripción del usuario
       break;
 
     case 'customer.subscription.created':
       const subscription = event.data.object;
       console.log(`📝 Suscripción creada: ${subscription.id}`);
-      // TODO: Guardar suscripción en base de datos
+
+      // Guardar suscripción en Supabase
+      try {
+        // Intentar obtener userId del metadata del customer
+        let userId = null;
+        if (subscription.customer) {
+          try {
+            const customer = await stripe.customers.retrieve(subscription.customer);
+            userId = customer.metadata?.userId;
+          } catch (customerError) {
+            console.error('⚠️  Error retrieving customer:', customerError);
+          }
+        }
+
+        await upsertSubscription(subscription, userId);
+        console.log('✅ Subscription saved to Supabase via webhook');
+      } catch (supabaseError) {
+        console.error('❌ Failed to save subscription to Supabase:', supabaseError);
+      }
       break;
 
     case 'customer.subscription.updated':
       const updatedSubscription = event.data.object;
       console.log(`🔄 Suscripción actualizada: ${updatedSubscription.id}`);
-      // TODO: Actualizar estado de suscripción en base de datos
+
+      // Actualizar suscripción en Supabase
+      try {
+        await upsertSubscription(updatedSubscription);
+        console.log('✅ Subscription updated in Supabase via webhook');
+      } catch (supabaseError) {
+        console.error('❌ Failed to update subscription in Supabase:', supabaseError);
+      }
       break;
 
     case 'customer.subscription.deleted':
       const deletedSubscription = event.data.object;
       console.log(`❌ Suscripción cancelada: ${deletedSubscription.id}`);
-      // TODO: Desactivar suscripción en base de datos
+
+      // Actualizar estado en Supabase
+      try {
+        await upsertSubscription(deletedSubscription);
+        console.log('✅ Subscription marked as deleted in Supabase via webhook');
+      } catch (supabaseError) {
+        console.error('❌ Failed to update subscription status in Supabase:', supabaseError);
+      }
       break;
+
     case 'invoice.payment_succeeded':
       const invoice = event.data.object;
       const subscriptionId = invoice.subscription;
-      console.log(`✅ Suscripción ${subscriptionId} activada automáticamente`);
-      // Aquí marcas al usuario como "suscrito" en tu BD
+      console.log(`✅ Pago exitoso para suscripción ${subscriptionId}`);
+
+      // Registrar el pago en Supabase
+      try {
+        await recordPayment(invoice);
+        console.log('✅ Payment recorded in Supabase via webhook');
+
+        // También actualizar la suscripción a 'active' si existe
+        if (subscriptionId) {
+          const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+          await upsertSubscription(subscription);
+          console.log('✅ Subscription status updated to active in Supabase');
+        }
+      } catch (supabaseError) {
+        console.error('❌ Failed to record payment in Supabase:', supabaseError);
+      }
       break;
+
     case 'invoice.payment_failed':
       const failedInvoice = event.data.object;
       console.log(`⚠️  Pago fallido para factura: ${failedInvoice.id}`);
-      // TODO: Notificar al usuario sobre el pago fallido
+
+      // Registrar el pago fallido
+      try {
+        await recordPayment(failedInvoice);
+        console.log('✅ Failed payment recorded in Supabase via webhook');
+      } catch (supabaseError) {
+        console.error('❌ Failed to record failed payment in Supabase:', supabaseError);
+      }
       break;
 
     default:
@@ -507,6 +561,15 @@ export const createSubscription = async (req, res) => {
       ? ['requires_action', 'requires_payment_method'].includes(paymentIntentStatus)
       : false;
 
+    // 🆕 Guardar la suscripción en Supabase
+    try {
+      await upsertSubscription(subscription, userId);
+      console.log('✅ Subscription saved to Supabase');
+    } catch (supabaseError) {
+      console.error('⚠️  Failed to save subscription to Supabase:', supabaseError);
+      // No lanzamos el error para no interrumpir el flujo de Stripe
+    }
+
     res.json({
       subscriptionId: subscription.id,
       subscriptionStatus: subscription.status,
@@ -532,7 +595,7 @@ export const createSubscription = async (req, res) => {
 
 export const createCard = async (req, res) => {
   try {
-    const { userId } = req.params; 
+    const { userId } = req.params;
 
     if (!userId) {
       return res.status(400).json({ error: "userId is required" });
