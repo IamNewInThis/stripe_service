@@ -532,13 +532,13 @@ export const createSubscription = async (req, res) => {
 
 export const createCard = async (req, res) => {
   try {
-    const { userId } = req.params; // 👈 lo obtienes de los parámetros de la ruta
+    const { userId } = req.params; 
 
     if (!userId) {
       return res.status(400).json({ error: "userId is required" });
     }
 
-    // 🔍 1️⃣ Buscar el Customer de Stripe asociado a este userId
+    // 1️⃣ Buscar el Customer de Stripe asociado a este usuario
     const customers = await stripe.customers.search({
       query: `metadata['userId']:'${userId}'`,
     });
@@ -549,30 +549,27 @@ export const createCard = async (req, res) => {
       });
     }
 
-    const customer = customers.data[0]; // primer resultado
+    const customer = customers.data[0]; // tomamos el primer resultado
 
-    // 🪄 2️⃣ Crear SetupIntent (para guardar una nueva tarjeta)
+    // 2️⃣ Crear un SetupIntent para que el usuario guarde una nueva tarjeta
     const setupIntent = await stripe.setupIntents.create({
       customer: customer.id,
       payment_method_types: ["card"],
     });
 
-    // 🗝️ 3️⃣ Crear Ephemeral Key (necesario para PaymentSheet)
+    // 3️⃣ Crear un Ephemeral Key (clave temporal) para el cliente
     const ephemeralKey = await stripe.ephemeralKeys.create(
       { customer: customer.id },
-      { apiVersion: "2024-06-20" } // Usa la versión actual de tu API
+      { apiVersion: "2024-06-20" }
     );
 
-
-    // 📦 4️⃣ Responder al frontend con la configuración del PaymentSheet
-    const paymentSheetConfig = {
+    // 4️⃣ Enviar al frontend los datos que necesita el PaymentSheet
+    return res.status(200).json({
       setupIntentClientSecret: setupIntent.client_secret,
       ephemeralKeySecret: ephemeralKey.secret,
       customer: customer.id,
       publishableKey: process.env.STRIPE_PUBLIC_KEY,
-    };
-
-    return res.status(200).json(paymentSheetConfig);
+    });
   } catch (error) {
     console.error("❌ Error creating SetupIntent:", error);
     return res.status(500).json({
@@ -659,6 +656,81 @@ export const setDefaultCard = async (req, res) => {
     console.error("❌ Error al establecer tarjeta por defecto:", error);
     return res.status(500).json({
       error: error.message || "Error al establecer tarjeta por defecto.",
+    });
+  }
+};
+
+export const deleteCard = async (req, res) => {
+  console.log("🧾 DELETE CARD - Params:", req.params);
+  console.log("🧾 DELETE CARD - Body:", req.body);
+  try {
+    const { userId } = req.params;
+    const { cardId } = req.body;
+
+    if (!userId || !cardId) {
+      return res
+        .status(400)
+        .json({ error: "Faltan parámetros: userId o cardId." });
+    }
+
+    // 🔍 Buscar el customer en Stripe por metadata['userId']
+    const customers = await stripe.customers.search({
+      query: `metadata['userId']:'${userId}'`,
+    });
+
+    if (!customers || customers.data.length === 0) {
+      return res
+        .status(404)
+        .json({ error: "Customer no encontrado para este userId." });
+    }
+
+    const customer = customers.data[0];
+    const currentDefault = customer.invoice_settings?.default_payment_method;
+
+    // 🔥 Eliminar la tarjeta
+    await stripe.paymentMethods.detach(cardId);
+    console.log(`🗑️ Tarjeta ${cardId} eliminada correctamente.`);
+
+    // 🧩 Buscar tarjetas restantes
+    const remainingCards = await stripe.paymentMethods.list({
+      customer: customer.id,
+      type: "card",
+    });
+
+    if (remainingCards.data.length > 0) {
+      // ✅ Asignar nueva tarjeta predeterminada (por ejemplo, la primera)
+      const newDefault = remainingCards.data[0].id;
+      await stripe.customers.update(customer.id, {
+        invoice_settings: {
+          default_payment_method: newDefault,
+        },
+      });
+
+      console.log(`✅ Nueva tarjeta predeterminada: ${newDefault}`);
+
+      return res.status(200).json({
+        message: "Tarjeta eliminada y nueva predeterminada asignada.",
+        removedCardId: cardId,
+        newDefaultCardId: newDefault,
+      });
+    }
+
+    // ⚠️ Si no hay más tarjetas, simplemente dejar sin default
+    await stripe.customers.update(customer.id, {
+      invoice_settings: { default_payment_method: null },
+    });
+
+    console.log("⚠️ Cliente quedó sin tarjeta predeterminada.");
+
+    return res.status(200).json({
+      message:
+        "Tarjeta eliminada. El cliente quedó sin tarjeta predeterminada.",
+      removedCardId: cardId,
+    });
+  } catch (error) {
+    console.error("❌ Error al eliminar tarjeta:", error);
+    return res.status(500).json({
+      error: error.message || "Error al eliminar tarjeta.",
     });
   }
 };
