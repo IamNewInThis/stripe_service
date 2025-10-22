@@ -315,7 +315,7 @@ export const cancelSubscription = async (req, res) => {
 
 /**
  * Prepara sesión para SetupIntent + PaymentSheet (guardar método de pago)
- */ 
+ */
 export const createSubscriptionSession = async (req, res) => {
   try {
     const { planId, priceId: priceIdOverride, userId, email, userName, metadata = {} } = req.body;
@@ -531,28 +531,134 @@ export const createSubscription = async (req, res) => {
 };
 
 export const createCard = async (req, res) => {
-  const { customerId, paymentMethodId, makeDefault } = req.body;
-
-  if (!customerId || !paymentMethodId) {
-    return res.status(400).json({ error: 'Missing required fields' });
-  }
-
   try {
-    const paymentMethod = await stripe.paymentMethods.attach(paymentMethodId, {
-      customer: customerId,
+    const { userId } = req.params; // 👈 lo obtienes de los parámetros de la ruta
+
+    if (!userId) {
+      return res.status(400).json({ error: "userId is required" });
+    }
+
+    // 🔍 1️⃣ Buscar el Customer de Stripe asociado a este userId
+    const customers = await stripe.customers.search({
+      query: `metadata['userId']:'${userId}'`,
     });
 
-    if (makeDefault) {
-      await stripe.customers.update(customerId, {
-        invoice_settings: {
-          default_payment_method: paymentMethod.id,
-        },
+    if (customers.data.length === 0) {
+      return res.status(404).json({
+        error: "Customer not found for this userId",
       });
     }
 
-    res.status(200).json({ success: true, paymentMethod });
+    const customer = customers.data[0]; // primer resultado
+
+    // 🪄 2️⃣ Crear SetupIntent (para guardar una nueva tarjeta)
+    const setupIntent = await stripe.setupIntents.create({
+      customer: customer.id,
+      payment_method_types: ["card"],
+    });
+
+    // 🗝️ 3️⃣ Crear Ephemeral Key (necesario para PaymentSheet)
+    const ephemeralKey = await stripe.ephemeralKeys.create(
+      { customer: customer.id },
+      { apiVersion: "2024-06-20" } // Usa la versión actual de tu API
+    );
+
+
+    // 📦 4️⃣ Responder al frontend con la configuración del PaymentSheet
+    const paymentSheetConfig = {
+      setupIntentClientSecret: setupIntent.client_secret,
+      ephemeralKeySecret: ephemeralKey.secret,
+      customer: customer.id,
+      publishableKey: process.env.STRIPE_PUBLIC_KEY,
+    };
+
+    return res.status(200).json(paymentSheetConfig);
   } catch (error) {
-    console.error('Error creating card:', error);
-    res.status(500).json({ error: 'Failed to create card', message: error.message });
+    console.error("❌ Error creating SetupIntent:", error);
+    return res.status(500).json({
+      error: "Failed to create SetupIntent",
+      message: error.message,
+    });
+  }
+};
+
+export const listCardsForUser = async (req, res) => {
+  try {
+    const { userId } = req.params;
+    if (!userId) return res.status(400).json({ error: "userId is required" });
+
+    // Buscar customer por metadata['userId']
+    const customers = await stripe.customers.search({
+      query: `metadata['userId']:'${userId}'`,
+    });
+
+    if (!customers || customers.data.length === 0) {
+      return res.status(404).json({ error: "Customer not found for this userId" });
+    }
+
+    const customer = customers.data[0];
+
+    // Obtener los métodos de pago tipo card asociados al customer
+    const paymentMethods = await stripe.paymentMethods.list({
+      customer: customer.id,
+      type: "card",
+    });
+
+    const customerInfo = await stripe.customers.retrieve(customer.id);
+    const defaultPaymentMethodId = customerInfo.invoice_settings?.default_payment_method;
+
+
+    // Mapear a lo que el frontend necesita (últimos 4, brand, exp_month, exp_year, id)
+    const cards = paymentMethods.data.map(pm => ({
+      id: pm.id,
+      brand: pm.card.brand,
+      last4: pm.card.last4,
+      exp_month: pm.card.exp_month,
+      exp_year: pm.card.exp_year,
+      isDefault: pm.id === defaultPaymentMethodId, // 👈 true solo si coincide con el default
+    }));
+
+    return res.status(200).json({ customer: customer.id, cards });
+  } catch (err) {
+    console.error("Error listing cards:", err);
+    return res.status(500).json({ error: "Failed to list cards", message: err.message });
+  }
+};
+
+export const setDefaultCard = async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { cardId } = req.body;
+    if (!userId) return res.status(400).json({ error: "userId is required" });
+
+    // Buscar customer por metadata['userId']
+    const customers = await stripe.customers.search({
+      query: `metadata['userId']:'${userId}'`,
+    });
+
+    if (!customers || customers.data.length === 0) {
+      return res.status(404).json({ error: "Customer not found for this userId" });
+    }
+
+    const customer = customers.data[0];
+
+    // ✅ Actualizar la tarjeta predeterminada del cliente en Stripe
+    const paymentMethods = await stripe.customers.update(customer.id, {
+      invoice_settings: {
+        default_payment_method: cardId,
+      },
+    });
+
+    console.log(`✅ Tarjeta ${cardId} establecida como predeterminada para el usuario ${userId}`);
+
+    return res.status(200).json({
+      message: "Tarjeta establecida como predeterminada correctamente.",
+      paymentMethods,
+    });
+  } catch (error) {
+    console.error("❌ Error al establecer tarjeta por defecto:", error);
+    return res.status(500).json({
+      error: error.message || "Error al establecer tarjeta por defecto.",
+    });
   }
 };

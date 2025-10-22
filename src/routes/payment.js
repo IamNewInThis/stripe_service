@@ -7,6 +7,8 @@ import {
     getSubscriptionStatusByUserId,
     createSubscription,
     createCard,
+    listCardsForUser,
+    setDefaultCard
 } from '../controllers/stripeController.js';
 
 const router = express.Router();
@@ -33,6 +35,11 @@ router.get("/subscription/user/:userId", getSubscriptionStatusByUserId);
 router.post('/subscription/cancel/:subscriptionId', cancelSubscription);
 
 // Añadir tarjetas de crédito
-router.post('/create-card', createCard);
+router.post('/create-card/:userId', createCard);
+
+//Listar tarjetas del cliente
+router.get('/cards/:userId', listCardsForUser);
+
+router.post('/cards/default/:userId', setDefaultCard);
 
 export default router;
