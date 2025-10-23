@@ -241,7 +241,7 @@ https://dashboard.stripe.com/webhooks
 
 ## 🤝 TODO
 
-- [ ] Integrar con Supabase para guardar suscripciones
+- [ ] Subir a servidor de producción
 - [ ] Añadir notificaciones push para eventos de pago
 - [ ] Implementar retry logic para webhooks fallidos
 - [ ] Añadir tests unitarios
