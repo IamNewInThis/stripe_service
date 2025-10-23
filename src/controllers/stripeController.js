@@ -135,173 +135,118 @@ export const handleWebhook = async (req, res) => {
   const sig = req.headers['stripe-signature'];
   let event;
 
-  console.log('🔥 WEBHOOK LLAMADO - Timestamp:', new Date().toISOString());
-  console.log('🔥 Signature presente:', !!sig);
-
   try {
     event = stripe.webhooks.constructEvent(
       req.body,
       sig,
       process.env.STRIPE_WEBHOOK_SECRET
     );
-    console.log('✅ Webhook signature verificada correctamente');
-    console.log(`📥 Received event: ${event.type}`);
   } catch (err) {
-    console.error('❌ Webhook signature verification failed:', err.message);
-    console.error('🧠 Body recibido:', req.body);
+    console.error('⚠️  Webhook signature verification failed:', err.message);
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
-  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log('📬 EVENT TYPE:', event.type);
-  console.log('📬 EVENT ID:', event.id);
-  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log(`📥 Received event: ${event.type}`);
 
   // Manejo de eventos
-  try {
-    switch (event.type) {
-      case 'checkout.session.completed': {
-        const session = event.data.object;
-        console.log('🎯 CASE: checkout.session.completed - EJECUTADO');
-        console.log(`✅ Checkout completado para usuario: ${session.metadata?.userId}`);
-        console.log(`   Session ID: ${session.id}`);
-        console.log(`   Customer: ${session.customer}`);
-        break;
-      }
+  switch (event.type) {
+    case 'checkout.session.completed':
+      const session = event.data.object;
+      console.log(`✅ Checkout completado para usuario: ${session.metadata.userId}`);
+      console.log(`   Session ID: ${session.id}`);
+      console.log(`   Customer: ${session.customer}`);
+      break;
 
-      case 'customer.subscription.created': {
-        const subscription = event.data.object;
-        console.log('🎯 CASE: customer.subscription.created - EJECUTADO');
-        console.log(`📝 Suscripción creada: ${subscription.id}`);
-        console.log(`   Status: ${subscription.status}`);
-        console.log(`   Customer: ${subscription.customer}`);
+    case 'customer.subscription.created':
+      const subscription = event.data.object;
+      console.log(`📝 Suscripción creada: ${subscription.id}`);
 
+      // Guardar suscripción en Supabase
+      try {
+        // Intentar obtener userId del metadata del customer
         let userId = null;
         if (subscription.customer) {
           try {
             const customer = await stripe.customers.retrieve(subscription.customer);
             userId = customer.metadata?.userId;
-            console.log(`   UserId from customer: ${userId}`);
           } catch (customerError) {
-            console.error('⚠️  Error retrieving customer:', customerError.message);
+            console.error('⚠️  Error retrieving customer:', customerError);
           }
         }
 
         await upsertSubscription(subscription, userId);
         console.log('✅ Subscription saved to Supabase via webhook');
-        break;
+      } catch (supabaseError) {
+        console.error('❌ Failed to save subscription to Supabase:', supabaseError);
       }
+      break;
 
-      case 'customer.subscription.updated': {
-        const updatedSubscription = event.data.object;
-        console.log('🎯 CASE: customer.subscription.updated - EJECUTADO');
-        console.log(`🔄 Suscripción actualizada: ${updatedSubscription.id}`);
-        console.log(`   Status: ${updatedSubscription.status}`);
-        console.log(`   Customer: ${updatedSubscription.customer}`);
+    case 'customer.subscription.updated':
+      const updatedSubscription = event.data.object;
+      console.log(`🔄 Suscripción actualizada: ${updatedSubscription.id}`);
 
+      // Actualizar suscripción en Supabase
+      try {
         await upsertSubscription(updatedSubscription);
         console.log('✅ Subscription updated in Supabase via webhook');
-        break;
+      } catch (supabaseError) {
+        console.error('❌ Failed to update subscription in Supabase:', supabaseError);
       }
+      break;
 
-      case 'customer.subscription.deleted': {
-        const deletedSubscription = event.data.object;
-        console.log('🎯 CASE: customer.subscription.deleted - EJECUTADO');
-        console.log(`❌ Suscripción cancelada: ${deletedSubscription.id}`);
-        console.log(`   Status: ${deletedSubscription.status}`);
+    case 'customer.subscription.deleted':
+      const deletedSubscription = event.data.object;
+      console.log(`❌ Suscripción cancelada: ${deletedSubscription.id}`);
 
+      // Actualizar estado en Supabase
+      try {
         await upsertSubscription(deletedSubscription);
         console.log('✅ Subscription marked as deleted in Supabase via webhook');
-        break;
+      } catch (supabaseError) {
+        console.error('❌ Failed to update subscription status in Supabase:', supabaseError);
       }
+      break;
 
-      case 'invoice.payment_succeeded': {
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log('🎯 CASE: invoice.payment_succeeded - EJECUTADO ✅');
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    case 'invoice.payment_succeeded':
+      const invoice = event.data.object;
+      const subscriptionId = invoice.subscription;
+      console.log(`✅ Pago exitoso para suscripción ${subscriptionId}`);
 
-        const invoice = event.data.object;
-
-        console.log('💰 Invoice ID:', invoice.id);
-        console.log('💰 Invoice Status:', invoice.status);
-        console.log('💰 Invoice Amount:', invoice.amount_paid);
-        console.log('💰 Invoice Customer:', invoice.customer);
-        console.log('💰 Invoice Subscription:', invoice.subscription);
-
-        const subscriptionId = invoice.subscription || null;
-
-        console.log(`✅ Pago exitoso para invoice: ${invoice.id}`);
-        console.log(`   Subscription ID: ${subscriptionId}`);
-
-        // Registrar pago en Supabase
-        console.log('💾 Guardando pago en Supabase...');
+      // Registrar el pago en Supabase
+      try {
         await recordPayment(invoice);
         console.log('✅ Payment recorded in Supabase via webhook');
 
-        // Si hay suscripción asociada, actualizarla
+        // También actualizar la suscripción a 'active' si existe
         if (subscriptionId) {
-          console.log(`🔄 Actualizando subscription: ${subscriptionId}`);
           const subscription = await stripe.subscriptions.retrieve(subscriptionId);
-          console.log(`   Subscription status: ${subscription.status}`);
-
           await upsertSubscription(subscription);
-          console.log('✅ Subscription status updated in Supabase');
-        } else {
-          console.warn('⚠️  No subscription ID found in invoice');
+          console.log('✅ Subscription status updated to active in Supabase');
         }
-
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log('🎯 CASE: invoice.payment_succeeded - FINALIZADO ✅');
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        break;
+      } catch (supabaseError) {
+        console.error('❌ Failed to record payment in Supabase:', supabaseError);
       }
+      break;
 
-      case 'invoice.payment_failed': {
-        const failedInvoice = event.data.object;
-        console.log('🎯 CASE: invoice.payment_failed - EJECUTADO');
-        console.log(`⚠️  Pago fallido para factura: ${failedInvoice.id}`);
-        console.log(`   Attempt count: ${failedInvoice.attempt_count}`);
-        console.log(`   Customer: ${failedInvoice.customer}`);
+    case 'invoice.payment_failed':
+      const failedInvoice = event.data.object;
+      console.log(`⚠️  Pago fallido para factura: ${failedInvoice.id}`);
 
+      // Registrar el pago fallido
+      try {
         await recordPayment(failedInvoice);
         console.log('✅ Failed payment recorded in Supabase via webhook');
-        break;
+      } catch (supabaseError) {
+        console.error('❌ Failed to record failed payment in Supabase:', supabaseError);
       }
+      break;
 
-      case 'payment_intent.succeeded': {
-        const paymentIntent = event.data.object;
-        console.log('🎯 CASE: payment_intent.succeeded - EJECUTADO');
-        console.log(`💳 PaymentIntent succeeded: ${paymentIntent.id}`);
-        console.log(`   Amount: ${paymentIntent.amount}`);
-        console.log(`   Customer: ${paymentIntent.customer}`);
-        break;
-      }
-
-      case 'payment_intent.payment_failed': {
-        const failedPaymentIntent = event.data.object;
-        console.log('🎯 CASE: payment_intent.payment_failed - EJECUTADO');
-        console.log(`⚠️  PaymentIntent failed: ${failedPaymentIntent.id}`);
-        console.log(`   Error: ${failedPaymentIntent.last_payment_error?.message}`);
-        break;
-      }
-
-      default:
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log(`⚠️  Evento no manejado: ${event.type}`);
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    }
-  } catch (handlerError) {
-    console.error('❌ Error handling webhook event:', handlerError);
-    console.error('❌ Error stack:', handlerError.stack);
+    default:
+      console.log(`ℹ️  Evento no manejado: ${event.type}`);
   }
-
-  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log('✅ Webhook procesado correctamente - respondiendo 200');
-  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
   res.json({ received: true });
 };
-
 
 export const getSubscriptionStatus = async (req, res) => {
   try {
@@ -341,7 +286,6 @@ export const getSubscriptionStatus = async (req, res) => {
     });
   }
 };
-
 
 export const getSubscriptionStatusByUserId = async (req, res) => {
   try {
