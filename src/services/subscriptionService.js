@@ -152,14 +152,14 @@ export async function upsertSubscription(stripeSubscription, userId = null) {
 /**
  * Registra un pago en Supabase desde un invoice de Stripe
  */
-export async function recordPayment(stripeInvoice) {
+export async function recordPayment(stripeInvoice , subscriptionId) {
     try {
         console.log('💳 Recording payment in Supabase:', {
             invoice_id: stripeInvoice.id,
             payment_intent: stripeInvoice.payment_intent,
             customer: stripeInvoice.customer,
             amount: stripeInvoice.amount_paid,
-            subscription: stripeInvoice.subscription
+            subscription: subscriptionId
         });
 
         // Buscar el user_id desde el customer de Stripe
@@ -176,9 +176,9 @@ export async function recordPayment(stripeInvoice) {
 
         const paymentData = {
             user_id: userId,
-            subscription_id: stripeInvoice.subscription || null, // debe guardar el stripe_subscription_id
+            subscription_id: subscriptionId,
             amount: stripeInvoice.amount_paid / 100, // Stripe usa centavos
-            stripe_payment_id: stripeInvoice.id, // ID de la factura (invoice.id)
+            stripe_payment_id: stripeInvoice.stripe, // ID de la factura (invoice.id)
             payment_status: stripeInvoice.status === 'paid' ? 'completed' : 
                            stripeInvoice.status === 'open' ? 'pending' : 'failed',
             transaction_date: new Date(stripeInvoice.created * 1000)

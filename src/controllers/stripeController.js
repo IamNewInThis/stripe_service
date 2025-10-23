@@ -209,12 +209,16 @@ export const handleWebhook = async (req, res) => {
 
     case 'invoice.payment_succeeded':
       const invoice = event.data.object;
-      const subscriptionId = invoice.subscription;
+      let subscriptionId =
+        invoice.subscription ||
+        invoice?.lines?.data?.[0]?.parent?.subscription_item_details?.subscription ||
+        invoice?.parent?.subscription_details?.subscription ||
+        null;
       console.log(`✅ Pago exitoso para suscripción ${subscriptionId}`);
 
       // Registrar el pago en Supabase
       try {
-        await recordPayment(invoice);
+        await recordPayment(invoice, subscriptionId);
         console.log('✅ Payment recorded in Supabase via webhook');
 
         // También actualizar la suscripción a 'active' si existe
