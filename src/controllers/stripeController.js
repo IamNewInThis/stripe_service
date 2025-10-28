@@ -176,6 +176,10 @@ export const handleWebhook = async (req, res) => {
 
         await upsertSubscription(subscription, userId);
         console.log('✅ Subscription saved to Supabase via webhook');
+        if (["active", "trialing"].includes(subscription.status)) {
+          await supabase.from("message_usage_daily").delete().eq("user_id", userId);
+          console.log("🧹 Contador de mensajes reseteado para usuario:", userId);
+        }
       } catch (supabaseError) {
         console.error('❌ Failed to save subscription to Supabase:', supabaseError);
       }

@@ -28,7 +28,7 @@ export async function findUserByStripeCustomerId(stripeCustomerId) {
             .limit(1)
             .single();
 
-        if (error && error.code !== 'PGRST116') { 
+        if (error && error.code !== 'PGRST116') {
             console.error('Error finding user by stripe customer id:', error);
             return null;
         }
@@ -55,7 +55,7 @@ export async function upsertSubscription(stripeSubscription, userId = null) {
         if (!userId) {
             // 1. Intentar desde metadata del customer en Stripe
             userId = await getUserIdFromStripeCustomer(stripeSubscription.customer);
-            
+
             // 2. Si no, buscar en subscriptions existentes
             if (!userId) {
                 userId = await findUserByStripeCustomerId(stripeSubscription.customer);
@@ -70,11 +70,11 @@ export async function upsertSubscription(stripeSubscription, userId = null) {
         // Determinar el plan basado en el price o nickname
         const priceItem = stripeSubscription.items?.data[0];
         let planName = 'monthly'; // default
-        
+
         if (priceItem?.price?.nickname) {
             planName = priceItem.price.nickname;
         } else if (priceItem?.price?.recurring?.interval) {
-            planName = priceItem.price.recurring.interval; 
+            planName = priceItem.price.recurring.interval;
         }
 
         // Calcular end_date basado en current_period_end de Stripe
@@ -89,7 +89,7 @@ export async function upsertSubscription(stripeSubscription, userId = null) {
             plan_name: planName,
             start_date: startDate,
             end_date: endDate,
-            canceled_date: stripeSubscription.canceled_at 
+            canceled_date: stripeSubscription.canceled_at
                 ? new Date(stripeSubscription.canceled_at * 1000)
                 : null
         };
@@ -152,7 +152,7 @@ export async function upsertSubscription(stripeSubscription, userId = null) {
 /**
  * Registra un pago en Supabase desde un invoice de Stripe
  */
-export async function recordPayment(stripeInvoice , subscriptionId) {
+export async function recordPayment(stripeInvoice, subscriptionId) {
     try {
         console.log('💳 Recording payment in Supabase:', {
             invoice_id: stripeInvoice.id,
@@ -164,11 +164,11 @@ export async function recordPayment(stripeInvoice , subscriptionId) {
 
         // Buscar el user_id desde el customer de Stripe
         let userId = await getUserIdFromStripeCustomer(stripeInvoice.customer);
-        
+
         if (!userId) {
             userId = await findUserByStripeCustomerId(stripeInvoice.customer);
         }
-        
+
         if (!userId) {
             console.error('❌ Cannot record payment: user_id not found for customer:', stripeInvoice.customer);
             return null;
@@ -179,8 +179,8 @@ export async function recordPayment(stripeInvoice , subscriptionId) {
             subscription_id: subscriptionId,
             amount: stripeInvoice.amount_paid / 100, // Stripe usa centavos
             stripe_payment_id: stripeInvoice.stripe, // ID de la factura (invoice.id)
-            payment_status: stripeInvoice.status === 'paid' ? 'completed' : 
-                           stripeInvoice.status === 'open' ? 'pending' : 'failed',
+            payment_status: stripeInvoice.status === 'paid' ? 'completed' :
+                stripeInvoice.status === 'open' ? 'pending' : 'failed',
             transaction_date: new Date(stripeInvoice.created * 1000)
         };
 
@@ -208,29 +208,46 @@ export async function recordPayment(stripeInvoice , subscriptionId) {
 /**
  * Actualiza el estado de una suscripción
  */
-export async function updateSubscriptionStatus(stripeSubscriptionId, status) {
+export async function updateSubscriptionStatus(stripeSubscription) {
     try {
-        console.log('🔄 Updating subscription status:', {
+        const stripeSubscriptionId = stripeSubscription.id;
+        const status = stripeSubscription.status;
+
+        // 🔢 Obtener fechas desde Stripe
+        const currentPeriodEnd = stripeSubscription.current_period_end
+            ? new Date(stripeSubscription.current_period_end * 1000).toISOString()
+            : null;
+
+        console.log(currentPeriodEnd);
+        const cancelAt = stripeSubscription.cancel_at
+            ? new Date(stripeSubscription.cancel_at * 1000).toISOString()
+            : null;
+
+        console.log('🔄 Actualizando suscripción en Supabase:', {
             stripe_subscription_id: stripeSubscriptionId,
-            status
+            status,
+            end_date: currentPeriodEnd,
+            cancel_at: cancelAt
         });
 
+        // 🧩 Actualizar en Supabase
         const { data, error } = await supabase
             .from('subscriptions')
-            .update({ 
+            .update({
                 status,
-                end_date: status === 'canceled' ? new Date() : null
+                end_date: currentPeriodEnd, // fecha fin del ciclo actual (aunque se renueve)
+                cancel_at: cancelAt
             })
             .eq('stripe_subscription_id', stripeSubscriptionId)
             .select()
             .single();
 
         if (error) {
-            console.error('❌ Error updating subscription status:', error);
+            console.error('❌ Error actualizando suscripción en Supabase:', error);
             throw error;
         }
 
-        console.log('✅ Subscription status updated:', data);
+        console.log('✅ Suscripción actualizada correctamente:', data);
         return data;
     } catch (error) {
         console.error('updateSubscriptionStatus error:', error);
