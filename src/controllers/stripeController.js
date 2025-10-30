@@ -1,6 +1,6 @@
 import Stripe from 'stripe';
 import dotenv from 'dotenv';
-import { upsertSubscription, recordPayment } from '../services/subscriptionService.js';
+import { upsertSubscription, recordPayment, cancelSubscriptionSB } from '../services/subscriptionService.js';
 dotenv.config();
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -131,6 +131,8 @@ export const createCheckoutSession = async (req, res) => {
   }
 };
 
+// src/routes/webhooks.js (o donde tengas handleWebhook)
+
 export const handleWebhook = async (req, res) => {
   const sig = req.headers['stripe-signature'];
   let event;
@@ -199,15 +201,21 @@ export const handleWebhook = async (req, res) => {
       break;
 
     case 'customer.subscription.deleted':
-      const deletedSubscription = event.data.object;
+       const deletedSubscription = event.data.object;
       console.log(`❌ Suscripción cancelada: ${deletedSubscription.id}`);
 
-      // Actualizar estado en Supabase
       try {
-        await upsertSubscription(deletedSubscription);
-        console.log('✅ Subscription marked as deleted in Supabase via webhook');
-      } catch (supabaseError) {
-        console.error('❌ Failed to update subscription status in Supabase:', supabaseError);
+        let userId = null;
+        if (deletedSubscription.customer) {
+          const customer = await stripe.customers.retrieve(deletedSubscription.customer);
+          userId = customer.metadata?.userId || customer.metadata?.supabase_user_id;
+        }
+
+        // 🆕 Usar la nueva función cancelSubscriptionSB
+        await cancelSubscriptionSB(deletedSubscription.id, userId);
+        console.log('✅ Subscription canceled in Supabase');
+      } catch (error) {
+        console.error('❌ Failed to cancel subscription:', error);
       }
       break;
 
@@ -254,8 +262,7 @@ export const handleWebhook = async (req, res) => {
   }
 
   res.json({ received: true });
-};
-
+}; 
 export const getSubscriptionStatus = async (req, res) => {
   try {
     const { customerId } = req.params;

@@ -2,6 +2,7 @@ import express from 'express';
 import dotenv from 'dotenv';
 import cors from 'cors';
 import paymentRoutes from './routes/payment.js';
+import { handleWebhook } from './controllers/stripeController.js';
 
 dotenv.config();
 const app = express();
@@ -9,8 +10,10 @@ const app = express();
 // Middlewares
 app.use(cors());
 
-// Webhook debe usar raw body antes de JSON parsing
-app.use('/api/payments/webhook', express.raw({ type: 'application/json' }));
+app.post('/api/payments/webhook', 
+    express.raw({ type: 'application/json' }),
+    handleWebhook
+);
 
 // Para el resto de rutas, usar JSON
 app.use(express.json());

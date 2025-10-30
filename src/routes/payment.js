@@ -1,6 +1,5 @@
 import express from 'express';
 import { 
-    handleWebhook,
     getSubscriptionStatus,
     cancelSubscription,
     createSubscriptionSession,
@@ -21,10 +20,6 @@ router.post('/create-subscription-session', createSubscriptionSession);
 router.post('/create-subscription', createSubscription);
 
 // Crear sesión de pago (para checkout web)
-
-// Webhook (para recibir eventos de Stripe)
-// IMPORTANTE: Esta ruta debe usar express.raw() configurado en app.js
-router.post('/webhook', handleWebhook);
 
 // Obtener estado de suscripción en base al customerId de Stripe
 router.get('/subscription/:customerId', getSubscriptionStatus);
