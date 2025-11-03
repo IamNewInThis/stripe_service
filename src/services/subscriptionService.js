@@ -65,14 +65,7 @@ export async function upsertSubscription(stripeSubscription, userId = null) {
 
         // Obtener userId
         if (!userId) {
-<<<<<<< Updated upstream
-            // 1. Intentar desde metadata del customer en Stripe
-            userId = await getUserIdFromStripeCustomer(stripeSubscription.customer);
-
-            // 2. Si no, buscar en subscriptions existentes
-=======
             userId = await getUserIdFromStripeCustomer(fullSubscription.customer);
->>>>>>> Stashed changes
             if (!userId) {
                 userId = await findUserByStripeCustomerId(fullSubscription.customer);
             }
@@ -83,15 +76,9 @@ export async function upsertSubscription(stripeSubscription, userId = null) {
             return null;
         }
 
-<<<<<<< Updated upstream
-        // Determinar el plan basado en el price o nickname
-        const priceItem = stripeSubscription.items?.data[0];
-        let planName = 'monthly'; // default
-=======
         // Determinar el plan
         const priceItem = fullSubscription.items?.data?.[0];
         let planName = 'monthly';
->>>>>>> Stashed changes
 
         if (priceItem?.price?.nickname) {
             planName = priceItem.price.nickname;
@@ -154,13 +141,8 @@ export async function upsertSubscription(stripeSubscription, userId = null) {
             plan_name: planName,
             start_date: startDate,
             end_date: endDate,
-<<<<<<< Updated upstream
-            canceled_date: stripeSubscription.canceled_at
-                ? new Date(stripeSubscription.canceled_at * 1000)
-=======
             canceled_date: fullSubscription.canceled_at 
                 ? new Date(fullSubscription.canceled_at * 1000)
->>>>>>> Stashed changes
                 : null
         };
 
@@ -221,9 +203,6 @@ export async function upsertSubscription(stripeSubscription, userId = null) {
 /**
  * Cancela una suscripción en Supabase cuando se cancela en Stripe
  */
-<<<<<<< Updated upstream
-export async function recordPayment(stripeInvoice, subscriptionId) {
-=======
 export async function cancelSubscriptionSB(stripeSubscriptionId, userId) {
     try {
         console.log('❌ Cancelando suscripción:', stripeSubscriptionId);
@@ -312,20 +291,14 @@ export async function cancelSubscriptionSB(stripeSubscriptionId, userId) {
  * ✅ PERMITE DUPLICADOS: Cada pago es un registro independiente
  */
 export async function recordPayment(stripeInvoice, subscriptionId = null) {
->>>>>>> Stashed changes
     try {
         console.log('💳 Recording payment in Supabase:', {
             invoice_id: stripeInvoice.id,
             subscription_id: subscriptionId,
             payment_intent: stripeInvoice.payment_intent,
             customer: stripeInvoice.customer,
-<<<<<<< Updated upstream
-            amount: stripeInvoice.amount_paid,
-            subscription: subscriptionId
-=======
             amount: stripeInvoice.amount_paid / 100,
             status: stripeInvoice.status
->>>>>>> Stashed changes
         });
 
         // Buscar user_id
@@ -353,16 +326,9 @@ export async function recordPayment(stripeInvoice, subscriptionId = null) {
         const paymentData = {
             user_id: userId,
             subscription_id: subscriptionId,
-<<<<<<< Updated upstream
-            amount: stripeInvoice.amount_paid / 100, // Stripe usa centavos
-            stripe_payment_id: stripeInvoice.stripe, // ID de la factura (invoice.id)
-            payment_status: stripeInvoice.status === 'paid' ? 'completed' :
-                stripeInvoice.status === 'open' ? 'pending' : 'failed',
-=======
             amount: stripeInvoice.amount_paid / 100,
             stripe_payment_id: stripeInvoice.payment_intent || stripeInvoice.id,
             payment_status: paymentStatus,
->>>>>>> Stashed changes
             transaction_date: new Date(stripeInvoice.created * 1000)
         };
 
@@ -394,59 +360,6 @@ export async function recordPayment(stripeInvoice, subscriptionId = null) {
 }
 
 /**
-<<<<<<< Updated upstream
- * Actualiza el estado de una suscripción
- */
-export async function updateSubscriptionStatus(stripeSubscription) {
-    try {
-        const stripeSubscriptionId = stripeSubscription.id;
-        const status = stripeSubscription.status;
-
-        // 🔢 Obtener fechas desde Stripe
-        const currentPeriodEnd = stripeSubscription.current_period_end
-            ? new Date(stripeSubscription.current_period_end * 1000).toISOString()
-            : null;
-
-        console.log(currentPeriodEnd);
-        const cancelAt = stripeSubscription.cancel_at
-            ? new Date(stripeSubscription.cancel_at * 1000).toISOString()
-            : null;
-
-        console.log('🔄 Actualizando suscripción en Supabase:', {
-            stripe_subscription_id: stripeSubscriptionId,
-            status,
-            end_date: currentPeriodEnd,
-            cancel_at: cancelAt
-        });
-
-        // 🧩 Actualizar en Supabase
-        const { data, error } = await supabase
-            .from('subscriptions')
-            .update({
-                status,
-                end_date: currentPeriodEnd, // fecha fin del ciclo actual (aunque se renueve)
-                cancel_at: cancelAt
-            })
-            .eq('stripe_subscription_id', stripeSubscriptionId)
-            .select()
-            .single();
-
-        if (error) {
-            console.error('❌ Error actualizando suscripción en Supabase:', error);
-            throw error;
-        }
-
-        console.log('✅ Suscripción actualizada correctamente:', data);
-        return data;
-    } catch (error) {
-        console.error('updateSubscriptionStatus error:', error);
-        throw error;
-    }
-}
-
-/**
-=======
->>>>>>> Stashed changes
  * Obtiene o crea un customer de Stripe para un usuario
  */
 export async function getOrCreateStripeCustomer(userId, email) {
