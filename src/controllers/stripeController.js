@@ -1,6 +1,6 @@
 import Stripe from 'stripe';
 import dotenv from 'dotenv';
-import { upsertSubscription, recordPayment, cancelSubscriptionSB } from '../services/subscriptionService.js';
+import { upsertSubscription, recordPayment, cancelSubscriptionSB, syncActiveSubscriptions } from '../services/subscriptionService.js';
 dotenv.config();
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -190,11 +190,20 @@ export const handleWebhook = async (req, res) => {
     case 'customer.subscription.updated':
       const updatedSubscription = event.data.object;
       console.log(`🔄 Suscripción actualizada: ${updatedSubscription.id}`);
+      console.log(`   - Status: ${updatedSubscription.status}`);
+      
+      // Validar fechas antes de convertir
+      if (updatedSubscription.current_period_start) {
+        console.log(`   - current_period_start: ${new Date(updatedSubscription.current_period_start * 1000).toISOString()}`);
+      }
+      if (updatedSubscription.current_period_end) {
+        console.log(`   - current_period_end: ${new Date(updatedSubscription.current_period_end * 1000).toISOString()}`);
+      }
 
       // Actualizar suscripción en Supabase
       try {
         await upsertSubscription(updatedSubscription);
-        console.log('✅ Subscription updated in Supabase via webhook');
+        console.log('✅ Subscription updated in Supabase via webhook (end_date actualizado)');
       } catch (supabaseError) {
         console.error('❌ Failed to update subscription in Supabase:', supabaseError);
       }
@@ -227,17 +236,28 @@ export const handleWebhook = async (req, res) => {
         invoice?.parent?.subscription_details?.subscription ||
         null;
       console.log(`✅ Pago exitoso para suscripción ${subscriptionId}`);
+      console.log(`📅 Invoice period: ${invoice.period_start} - ${invoice.period_end}`);
 
       // Registrar el pago en Supabase
       try {
         await recordPayment(invoice, subscriptionId);
         console.log('✅ Payment recorded in Supabase via webhook');
 
-        // También actualizar la suscripción a 'active' si existe
+        // ⚡ IMPORTANTE: Actualizar la suscripción con el nuevo período
         if (subscriptionId) {
           const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+          console.log(`🔄 Actualizando end_date de suscripción ${subscriptionId}`);
+          
+          // Validar fechas antes de convertir
+          if (subscription.current_period_start) {
+            console.log(`   - current_period_start: ${new Date(subscription.current_period_start * 1000).toISOString()}`);
+          }
+          if (subscription.current_period_end) {
+            console.log(`   - current_period_end: ${new Date(subscription.current_period_end * 1000).toISOString()}`);
+          }
+          
           await upsertSubscription(subscription);
-          console.log('✅ Subscription status updated to active in Supabase');
+          console.log('✅ Subscription dates updated in Supabase after payment');
         }
       } catch (supabaseError) {
         console.error('❌ Failed to record payment in Supabase:', supabaseError);
@@ -809,6 +829,29 @@ export const deleteCard = async (req, res) => {
     console.error("❌ Error al eliminar tarjeta:", error);
     return res.status(500).json({
       error: error.message || "Error al eliminar tarjeta.",
+    });
+  }
+};
+
+/**
+ * Endpoint para sincronizar manualmente suscripciones desde Stripe
+ * Útil cuando los webhooks fallan o para verificar sincronización
+ */
+export const syncSubscriptions = async (req, res) => {
+  try {
+    console.log('🔄 Iniciando sincronización manual de suscripciones...');
+    
+    const result = await syncActiveSubscriptions();
+    
+    res.json({
+      message: 'Sincronización completada',
+      ...result
+    });
+  } catch (err) {
+    console.error('❌ Error al sincronizar suscripciones:', err);
+    res.status(500).json({
+      error: 'Failed to sync subscriptions',
+      message: err.message
     });
   }
 };

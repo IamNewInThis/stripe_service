@@ -8,7 +8,8 @@ import {
     createCard,
     listCardsForUser,
     setDefaultCard,
-    deleteCard
+    deleteCard,
+    syncSubscriptions
 } from '../controllers/stripeController.js';
 
 const router = express.Router();
@@ -41,5 +42,8 @@ router.post('/cards/default/:userId', setDefaultCard);
 
 //Eliminar tarjeta de credito
 router.post('/cards/delete/:userId', deleteCard);
+
+// Sincronizar suscripciones manualmente desde Stripe
+router.post('/sync-subscriptions', syncSubscriptions);
 
 export default router;

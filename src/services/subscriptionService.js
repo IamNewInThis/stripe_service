@@ -395,3 +395,70 @@ export async function getOrCreateStripeCustomer(userId, email) {
         throw error;
     }
 }
+
+/**
+ * Sincroniza suscripciones activas desde Stripe (útil para catch-up si webhooks fallan)
+ * Actualiza end_date y status basándose en datos de Stripe
+ */
+export async function syncActiveSubscriptions() {
+    try {
+        console.log('🔄 Sincronizando suscripciones activas desde Stripe...');
+
+        // Obtener todas las suscripciones activas o pasadas de Supabase
+        const { data: subscriptions, error } = await supabase
+            .from('subscriptions')
+            .select('stripe_subscription_id, user_id, status, end_date')
+            .in('status', ['active', 'trialing', 'past_due']);
+
+        if (error) {
+            console.error('❌ Error obteniendo suscripciones de Supabase:', error);
+            return;
+        }
+
+        if (!subscriptions || subscriptions.length === 0) {
+            console.log('ℹ️ No hay suscripciones activas para sincronizar');
+            return;
+        }
+
+        console.log(`📊 Sincronizando ${subscriptions.length} suscripciones...`);
+
+        let updated = 0;
+        let errors = 0;
+
+        for (const sub of subscriptions) {
+            try {
+                // Obtener datos actuales desde Stripe
+                const stripeSubscription = await stripe.subscriptions.retrieve(sub.stripe_subscription_id);
+                
+                const currentEndDate = sub.end_date ? new Date(sub.end_date) : null;
+                const stripeEndDate = new Date(stripeSubscription.current_period_end * 1000);
+
+                // Verificar si el end_date necesita actualizarse
+                const needsUpdate = 
+                    !currentEndDate || 
+                    currentEndDate.getTime() !== stripeEndDate.getTime() ||
+                    sub.status !== stripeSubscription.status;
+
+                if (needsUpdate) {
+                    console.log(`🔄 Actualizando suscripción ${sub.stripe_subscription_id}`);
+                    console.log(`   - End date actual: ${currentEndDate?.toISOString() || 'null'}`);
+                    console.log(`   - End date Stripe: ${stripeEndDate.toISOString()}`);
+                    console.log(`   - Status actual: ${sub.status}`);
+                    console.log(`   - Status Stripe: ${stripeSubscription.status}`);
+                    
+                    await upsertSubscription(stripeSubscription, sub.user_id);
+                    updated++;
+                }
+            } catch (subError) {
+                console.error(`❌ Error sincronizando suscripción ${sub.stripe_subscription_id}:`, subError);
+                errors++;
+            }
+        }
+
+        console.log(`✅ Sincronización completada: ${updated} actualizadas, ${errors} errores`);
+        return { updated, errors, total: subscriptions.length };
+    } catch (error) {
+        console.error('syncActiveSubscriptions error:', error);
+        throw error;
+    }
+}
