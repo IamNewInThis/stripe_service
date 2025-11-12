@@ -3,7 +3,7 @@ import Stripe from 'stripe';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-async function getUserIdFromStripeCustomer(stripeCustomerId) {
+export async function getUserIdFromStripeCustomer(stripeCustomerId) {
     try {
         const customer = await stripe.customers.retrieve(stripeCustomerId);
         return customer.metadata?.userId || customer.metadata?.supabase_user_id || null;
@@ -89,9 +89,9 @@ export async function upsertSubscription(stripeSubscription, userId = null) {
         // Calcular fechas
         const startDate = fullSubscription.current_period_start
             ? new Date(fullSubscription.current_period_start * 1000)
-            : fullSubscription.start_date 
-            ? new Date(fullSubscription.start_date * 1000)
-            : new Date(fullSubscription.created * 1000);
+            : fullSubscription.start_date
+                ? new Date(fullSubscription.start_date * 1000)
+                : new Date(fullSubscription.created * 1000);
 
         let endDate = null;
 
@@ -103,9 +103,9 @@ export async function upsertSubscription(stripeSubscription, userId = null) {
         } else if (fullSubscription.billing_cycle_anchor && priceItem?.price?.recurring) {
             const interval = priceItem.price.recurring.interval;
             const intervalCount = priceItem.price.recurring.interval_count || 1;
-            
+
             endDate = new Date(fullSubscription.billing_cycle_anchor * 1000);
-            
+
             if (interval === 'month') {
                 endDate.setMonth(endDate.getMonth() + intervalCount);
             } else if (interval === 'year') {
@@ -141,7 +141,7 @@ export async function upsertSubscription(stripeSubscription, userId = null) {
             plan_name: planName,
             start_date: startDate,
             end_date: endDate,
-            canceled_date: fullSubscription.canceled_at 
+            canceled_date: fullSubscription.canceled_at
                 ? new Date(fullSubscription.canceled_at * 1000)
                 : null
         };
@@ -172,10 +172,7 @@ export async function upsertSubscription(stripeSubscription, userId = null) {
         // Guardar
         const { data, error } = await supabase
             .from('subscriptions')
-            .upsert(subscriptionData, {
-                onConflict: 'stripe_subscription_id',
-                ignoreDuplicates: false
-            })
+            .upsert(subscriptionData, { onConflict: 'stripe_subscription_id,start_date' })
             .select()
             .single();
 
@@ -207,7 +204,7 @@ export async function cancelSubscriptionSB(stripeSubscriptionId, userId) {
     try {
         console.log('❌ Cancelando suscripción:', stripeSubscriptionId);
 
-        // Obtener datos completos desde Stripe
+        // 1️⃣ Obtener datos completos desde Stripe
         let fullSubscription;
         try {
             fullSubscription = await stripe.subscriptions.retrieve(stripeSubscriptionId);
@@ -220,13 +217,10 @@ export async function cancelSubscriptionSB(stripeSubscriptionId, userId) {
             return null;
         }
 
-        // Obtener userId si no se proporcionó
+        // 2️⃣ Obtener userId si no se proporcionó
         if (!userId) {
             userId = await getUserIdFromStripeCustomer(fullSubscription.customer);
-
-            if (!userId) {
-                userId = await findUserByStripeCustomerId(fullSubscription.customer);
-            }
+            if (!userId) userId = await findUserByStripeCustomerId(fullSubscription.customer);
         }
 
         if (!userId) {
@@ -234,13 +228,11 @@ export async function cancelSubscriptionSB(stripeSubscriptionId, userId) {
             return null;
         }
 
-        // Calcular fechas de cancelación
-        const canceledDate = fullSubscription.canceled_at 
+        // 3️⃣ Calcular fechas de cancelación
+        const canceledDate = fullSubscription.canceled_at
             ? new Date(fullSubscription.canceled_at * 1000)
             : new Date();
 
-        // end_date: mantener current_period_end si existe (acceso hasta fin de periodo)
-        // o usar canceled_date si es cancelación inmediata
         const endDate = fullSubscription.current_period_end
             ? new Date(fullSubscription.current_period_end * 1000)
             : canceledDate;
@@ -249,7 +241,25 @@ export async function cancelSubscriptionSB(stripeSubscriptionId, userId) {
         console.log('  - canceled_date:', canceledDate.toISOString());
         console.log('  - end_date:', endDate.toISOString());
 
-        // Actualizar en Supabase
+        // 4️⃣ Buscar la suscripción activa más reciente en Supabase
+        const { data: activeSubs, error: selectError } = await supabase
+            .from('subscriptions')
+            .select('id')
+            .eq('stripe_subscription_id', stripeSubscriptionId)
+            .eq('status', 'active')
+            .order('start_date', { ascending: false })
+            .limit(1);
+
+        if (selectError) throw selectError;
+
+        if (!activeSubs || activeSubs.length === 0) {
+            console.warn('⚠️ No active subscription found for:', stripeSubscriptionId);
+            return null;
+        }
+
+        const activeId = activeSubs[0].id;
+
+        // 5️⃣ Actualizar esa suscripción a "canceled"
         const { data, error } = await supabase
             .from('subscriptions')
             .update({
@@ -257,19 +267,11 @@ export async function cancelSubscriptionSB(stripeSubscriptionId, userId) {
                 canceled_date: canceledDate,
                 end_date: endDate
             })
-            .eq('stripe_subscription_id', stripeSubscriptionId)
+            .eq('id', activeId)
             .select()
             .single();
 
-        if (error) {
-            console.error('❌ Error canceling subscription in Supabase:', error);
-            throw error;
-        }
-
-        if (!data) {
-            console.warn('⚠️ No subscription found with stripe_subscription_id:', stripeSubscriptionId);
-            return null;
-        }
+        if (error) throw error;
 
         console.log('✅ Subscription canceled successfully:', {
             id: data.id,
@@ -397,6 +399,150 @@ export async function getOrCreateStripeCustomer(userId, email) {
 }
 
 /**
+ * Resetea el contador de mensajes diarios para un usuario
+ */
+export async function resetMessageCounter(userId) {
+    try {
+        if (!userId) {
+            console.warn('⚠️ No userId provided to resetMessageCounter');
+            return false;
+        }
+
+        const { error } = await supabase
+            .from("message_usage")
+            .delete()
+            .eq("user_id", userId);
+
+        if (error) {
+            console.error('❌ Error reseteando contador de mensajes:', error);
+            return false;
+        }
+
+        console.log("🧹 Contador de mensajes reseteado para usuario:", userId);
+        return true;
+    } catch (error) {
+        console.error('resetMessageCounter error:', error);
+        return false;
+    }
+}
+
+/**
+ * Procesa la renovación de una suscripción
+ * Marca el período anterior como completado y crea un nuevo registro
+ */
+export async function handleSubscriptionRenewal(stripeSubscription, subscriptionId, periodStartSec = null, periodEndSec = null) {
+    try {
+        console.log(`🔄 Forzando renovación de suscripción ${subscriptionId}`);
+
+        // Calcular periodos
+        const newPeriodStart = periodStartSec
+            ? new Date(periodStartSec * 1000)
+            : stripeSubscription.current_period_start
+                ? new Date(stripeSubscription.current_period_start * 1000)
+                : null;
+
+        const newPeriodEnd = periodEndSec
+            ? new Date(periodEndSec * 1000)
+            : stripeSubscription.current_period_end
+                ? new Date(stripeSubscription.current_period_end * 1000)
+                : null;
+
+        if (newPeriodStart) console.log(`   - newPeriodStart: ${newPeriodStart.toISOString()}`);
+        if (newPeriodEnd) console.log(`   - newPeriodEnd: ${newPeriodEnd.toISOString()}`);
+
+        // Obtener suscripción existente
+        const { data: existingSub } = await supabase
+            .from('subscriptions')
+            .select('id, user_id, status, end_date')
+            .eq('stripe_subscription_id', subscriptionId)
+            .eq('status', 'active')
+            .maybeSingle();
+
+        if (existingSub) {
+            console.log(`🧾 Suscripción activa existente encontrada (id: ${existingSub.id}). Cancelando...`);
+
+            // 1️⃣ Marcar la anterior como completada o cancelada
+            const { error: updateError } = await supabase
+                .from('subscriptions')
+                .update({
+                    status: 'completed',
+                    end_date: newPeriodStart || new Date()
+                })
+                .eq('id', existingSub.id);
+
+            if (updateError) {
+                console.error('❌ Error al cancelar suscripción previa:', updateError);
+                throw updateError;
+            }
+
+            console.log('✅ Suscripción anterior marcada como completada');
+        } else {
+            console.log('ℹ️ No había suscripción activa previa');
+        }
+
+        // 2️⃣ Crear nuevo registro (siempre)
+        let userId = existingSub?.user_id;
+        if (!userId) {
+            userId = await getUserIdFromStripeCustomer(stripeSubscription.customer);
+            if (!userId) userId = await findUserByStripeCustomerId(stripeSubscription.customer);
+        }
+
+        if (!userId) {
+            console.error('❌ No se pudo obtener userId para la renovación');
+            throw new Error('userId not found for subscription renewal');
+        }
+
+        const priceItem = stripeSubscription.items?.data?.[0];
+        let planName = 'monthly';
+        if (priceItem?.price?.nickname) {
+            planName = priceItem.price.nickname;
+        } else if (priceItem?.price?.recurring?.interval) {
+            planName = priceItem.price.recurring.interval;
+        }
+
+        const newSubscriptionData = {
+            user_id: userId,
+            stripe_customer_id: stripeSubscription.customer,
+            stripe_subscription_id: stripeSubscription.id,
+            status: stripeSubscription.status || 'active',
+            plan_name: planName,
+            start_date: newPeriodStart || new Date(),
+            end_date: newPeriodEnd || null,
+            canceled_date: null
+        };
+
+        console.log('🆕 Creando nueva suscripción con datos:', newSubscriptionData);
+
+        const { data: newSub, error: insertError } = await supabase
+            .from('subscriptions')
+            .insert(newSubscriptionData)
+            .select()
+            .single();
+
+        if (insertError) {
+            console.error('❌ Error creando nueva suscripción:', insertError);
+            throw insertError;
+        }
+
+        console.log('✅ Nueva suscripción creada:', {
+            id: newSub.id,
+            start_date: newSub.start_date,
+            end_date: newSub.end_date,
+            status: newSub.status
+        });
+
+        await resetMessageCounter(userId);
+
+        return { renewed: true, subscription: newSub, userId };
+
+    } catch (error) {
+        console.error('❌ Error en handleSubscriptionRenewal (forzada):', error);
+        throw error;
+    }
+}
+
+
+/**
  * Sincroniza suscripciones activas desde Stripe (útil para catch-up si webhooks fallan)
  * Actualiza end_date y status basándose en datos de Stripe
  */
@@ -429,13 +575,13 @@ export async function syncActiveSubscriptions() {
             try {
                 // Obtener datos actuales desde Stripe
                 const stripeSubscription = await stripe.subscriptions.retrieve(sub.stripe_subscription_id);
-                
+
                 const currentEndDate = sub.end_date ? new Date(sub.end_date) : null;
                 const stripeEndDate = new Date(stripeSubscription.current_period_end * 1000);
 
                 // Verificar si el end_date necesita actualizarse
-                const needsUpdate = 
-                    !currentEndDate || 
+                const needsUpdate =
+                    !currentEndDate ||
                     currentEndDate.getTime() !== stripeEndDate.getTime() ||
                     sub.status !== stripeSubscription.status;
 
@@ -445,7 +591,7 @@ export async function syncActiveSubscriptions() {
                     console.log(`   - End date Stripe: ${stripeEndDate.toISOString()}`);
                     console.log(`   - Status actual: ${sub.status}`);
                     console.log(`   - Status Stripe: ${stripeSubscription.status}`);
-                    
+
                     await upsertSubscription(stripeSubscription, sub.user_id);
                     updated++;
                 }

@@ -1,6 +1,6 @@
 import Stripe from 'stripe';
 import dotenv from 'dotenv';
-import { upsertSubscription, recordPayment, cancelSubscriptionSB, syncActiveSubscriptions } from '../services/subscriptionService.js';
+import { upsertSubscription, recordPayment, cancelSubscriptionSB, syncActiveSubscriptions, handleSubscriptionRenewal, resetMessageCounter } from '../services/subscriptionService.js';
 dotenv.config();
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -178,9 +178,9 @@ export const handleWebhook = async (req, res) => {
 
         await upsertSubscription(subscription, userId);
         console.log('✅ Subscription saved to Supabase via webhook');
+
         if (["active", "trialing"].includes(subscription.status)) {
-          await supabase.from("message_usage_daily").delete().eq("user_id", userId);
-          console.log("🧹 Contador de mensajes reseteado para usuario:", userId);
+          await resetMessageCounter(userId);
         }
       } catch (supabaseError) {
         console.error('❌ Failed to save subscription to Supabase:', supabaseError);
@@ -191,7 +191,7 @@ export const handleWebhook = async (req, res) => {
       const updatedSubscription = event.data.object;
       console.log(`🔄 Suscripción actualizada: ${updatedSubscription.id}`);
       console.log(`   - Status: ${updatedSubscription.status}`);
-      
+
       // Validar fechas antes de convertir
       if (updatedSubscription.current_period_start) {
         console.log(`   - current_period_start: ${new Date(updatedSubscription.current_period_start * 1000).toISOString()}`);
@@ -210,7 +210,7 @@ export const handleWebhook = async (req, res) => {
       break;
 
     case 'customer.subscription.deleted':
-       const deletedSubscription = event.data.object;
+      const deletedSubscription = event.data.object;
       console.log(`❌ Suscripción cancelada: ${deletedSubscription.id}`);
 
       try {
@@ -243,21 +243,22 @@ export const handleWebhook = async (req, res) => {
         await recordPayment(invoice, subscriptionId);
         console.log('✅ Payment recorded in Supabase via webhook');
 
-        // ⚡ IMPORTANTE: Actualizar la suscripción con el nuevo período
+        // ⚡ IMPORTANTE: Detectar renovación y crear nuevo registro
         if (subscriptionId) {
           const subscription = await stripe.subscriptions.retrieve(subscriptionId);
-          console.log(`🔄 Actualizando end_date de suscripción ${subscriptionId}`);
-          
-          // Validar fechas antes de convertir
-          if (subscription.current_period_start) {
-            console.log(`   - current_period_start: ${new Date(subscription.current_period_start * 1000).toISOString()}`);
+
+          // Obtener periodos directamente desde el invoice si están presentes (más fiables)
+          const periodStart = invoice.lines?.data?.[0]?.period?.start || invoice.period_start || null;
+          const periodEnd = invoice.lines?.data?.[0]?.period?.end || invoice.period_end || null;
+
+          // Delegar la lógica de renovación al servicio (pasando periodos si están disponibles)
+          const renewalResult = await handleSubscriptionRenewal(subscription, subscriptionId, periodStart, periodEnd);
+
+          if (renewalResult.renewed) {
+            console.log('🎉 Renovación procesada exitosamente');
+          } else if (renewalResult.updated) {
+            console.log('✅ Suscripción actualizada (no era renovación)');
           }
-          if (subscription.current_period_end) {
-            console.log(`   - current_period_end: ${new Date(subscription.current_period_end * 1000).toISOString()}`);
-          }
-          
-          await upsertSubscription(subscription);
-          console.log('✅ Subscription dates updated in Supabase after payment');
         }
       } catch (supabaseError) {
         console.error('❌ Failed to record payment in Supabase:', supabaseError);
@@ -282,7 +283,8 @@ export const handleWebhook = async (req, res) => {
   }
 
   res.json({ received: true });
-}; 
+};
+
 export const getSubscriptionStatus = async (req, res) => {
   try {
     const { customerId } = req.params;
@@ -840,9 +842,9 @@ export const deleteCard = async (req, res) => {
 export const syncSubscriptions = async (req, res) => {
   try {
     console.log('🔄 Iniciando sincronización manual de suscripciones...');
-    
+
     const result = await syncActiveSubscriptions();
-    
+
     res.json({
       message: 'Sincronización completada',
       ...result
