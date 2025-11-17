@@ -296,8 +296,26 @@ export async function upsertSubscription(stripeSubscription, userId = null) {
         let resultSubscription = null;
 
         if (duplicateCheck) {
-            console.warn('⚠️ Periodo ya creado anteriormente. Reutilizando registro existente.');
-            resultSubscription = duplicateCheck;
+            console.warn('⚠️ Periodo ya creado anteriormente. Actualizando registro existente.');
+            const { data: updatedDuplicate, error: updateDuplicateError } = await supabase
+                .from('subscriptions')
+                .update({
+                    status: nextSubscriptionData.status,
+                    plan_name: nextSubscriptionData.plan_name,
+                    start_date: nextSubscriptionData.start_date,
+                    end_date: nextSubscriptionData.end_date,
+                    canceled_date: nextSubscriptionData.canceled_date
+                })
+                .eq('id', duplicateCheck.id)
+                .select()
+                .single();
+
+            if (updateDuplicateError) {
+                console.error('❌ Error actualizando periodo duplicado:', updateDuplicateError);
+                throw updateDuplicateError;
+            }
+
+            resultSubscription = updatedDuplicate;
         } else {
             const { data: inserted, error: insertRenewedError } = await supabase
                 .from('subscriptions')
