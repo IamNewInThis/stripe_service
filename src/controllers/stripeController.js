@@ -1,6 +1,13 @@
 import Stripe from 'stripe';
 import dotenv from 'dotenv';
-import { upsertSubscription, recordPayment, cancelSubscriptionSB, syncActiveSubscriptions, handleSubscriptionRenewal, resetMessageCounter } from '../services/subscriptionService.js';
+import {
+  upsertSubscription,
+  recordPayment,
+  cancelSubscriptionSB,
+  syncActiveSubscriptions,
+  resetMessageCounter,
+  createSubscription as createSubscriptionRecord,
+} from '../services/subscriptionService.js';
 dotenv.config();
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -175,8 +182,7 @@ export const handleWebhook = async (req, res) => {
             console.error('⚠️  Error retrieving customer:', customerError);
           }
         }
-
-        await upsertSubscription(subscription, userId);
+        await createSubscriptionRecord(subscription, userId);
         console.log('✅ Subscription saved to Supabase via webhook');
 
         if (["active", "trialing"].includes(subscription.status)) {
@@ -192,18 +198,24 @@ export const handleWebhook = async (req, res) => {
       console.log(`🔄 Suscripción actualizada: ${updatedSubscription.id}`);
       console.log(`   - Status: ${updatedSubscription.status}`);
 
-      // Validar fechas antes de convertir
-      if (updatedSubscription.current_period_start) {
-        console.log(`   - current_period_start: ${new Date(updatedSubscription.current_period_start * 1000).toISOString()}`);
-      }
-      if (updatedSubscription.current_period_end) {
-        console.log(`   - current_period_end: ${new Date(updatedSubscription.current_period_end * 1000).toISOString()}`);
-      }
-
       // Actualizar suscripción en Supabase
       try {
-        await upsertSubscription(updatedSubscription);
+        let userId = null;
+        if (updatedSubscription.customer) {
+          try {
+            const customer = await stripe.customers.retrieve(updatedSubscription.customer);
+            userId = customer.metadata?.userId || customer.metadata?.supabase_user_id || null;
+          } catch (customerError) {
+            console.error('⚠️  Error retrieving customer for subscription update:', customerError);
+          }
+        }
+
+        await upsertSubscription(updatedSubscription, userId);
         console.log('✅ Subscription updated in Supabase via webhook (end_date actualizado)');
+
+        if (userId && ["active", "trialing"].includes(updatedSubscription.status)) {
+          await resetMessageCounter(userId);
+        }
       } catch (supabaseError) {
         console.error('❌ Failed to update subscription in Supabase:', supabaseError);
       }
@@ -236,30 +248,13 @@ export const handleWebhook = async (req, res) => {
         invoice?.parent?.subscription_details?.subscription ||
         null;
       console.log(`✅ Pago exitoso para suscripción ${subscriptionId}`);
-      console.log(`📅 Invoice period: ${invoice.period_start} - ${invoice.period_end}`);
 
       // Registrar el pago en Supabase
       try {
         await recordPayment(invoice, subscriptionId);
         console.log('✅ Payment recorded in Supabase via webhook');
 
-        // ⚡ IMPORTANTE: Detectar renovación y crear nuevo registro
-        if (subscriptionId) {
-          const subscription = await stripe.subscriptions.retrieve(subscriptionId);
-
-          // Obtener periodos directamente desde el invoice si están presentes (más fiables)
-          const periodStart = invoice.lines?.data?.[0]?.period?.start || invoice.period_start || null;
-          const periodEnd = invoice.lines?.data?.[0]?.period?.end || invoice.period_end || null;
-
-          // Delegar la lógica de renovación al servicio (pasando periodos si están disponibles)
-          const renewalResult = await handleSubscriptionRenewal(subscription, subscriptionId, periodStart, periodEnd);
-
-          if (renewalResult.renewed) {
-            console.log('🎉 Renovación procesada exitosamente');
-          } else if (renewalResult.updated) {
-            console.log('✅ Suscripción actualizada (no era renovación)');
-          }
-        }
+        console.log('ℹ️ Renovation handler deshabilitado temporalmente. Ningún ciclo adicional se generará automáticamente.');
       } catch (supabaseError) {
         console.error('❌ Failed to record payment in Supabase:', supabaseError);
       }
@@ -605,6 +600,30 @@ export const createSubscription = async (req, res) => {
     } catch (supabaseError) {
       console.error('⚠️  Failed to save subscription to Supabase:', supabaseError);
       // No lanzamos el error para no interrumpir el flujo de Stripe
+    }
+
+    // 📅 Alinear contador local con el período actual si el pago fue exitoso
+    try {
+      const latestInvoice = subscription.latest_invoice || null;
+      const latestInvoiceStatus = invoicePaymentStatus || latestInvoice?.status || null;
+      const periodStart =
+        latestInvoice?.lines?.data?.[0]?.period?.start ||
+        latestInvoice?.period_start ||
+        subscription.current_period_start ||
+        null;
+      const periodEnd =
+        latestInvoice?.lines?.data?.[0]?.period?.end ||
+        latestInvoice?.period_end ||
+        subscription.current_period_end ||
+        null;
+
+      if (latestInvoiceStatus === 'paid' || subscription.status === 'active') {
+        console.log('ℹ️ Renovation handler deshabilitado temporalmente en createSubscription.');
+      } else {
+        console.log('ℹ️ Pago aún no confirmado; se esperará al webhook para renovar.');
+      }
+    } catch (renewalError) {
+      console.error('⚠️  Failed to align subscription period after creation:', renewalError);
     }
 
     res.json({

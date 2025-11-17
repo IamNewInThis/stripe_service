@@ -2,6 +2,12 @@ import supabase from '../config/supabase.js';
 import Stripe from 'stripe';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+const UTC_MINUS_3_OFFSET_SECONDS = 3 * 60 * 60;
+
+const toUtcMinus3Date = (seconds) => {
+    if (seconds == null) return null;
+    return new Date((seconds - UTC_MINUS_3_OFFSET_SECONDS) * 1000);
+};
 
 export async function getUserIdFromStripeCustomer(stripeCustomerId) {
     try {
@@ -37,8 +43,109 @@ export async function findUserByStripeCustomerId(stripeCustomerId) {
     }
 }
 
+
+export async function createSubscription(stripeSubscription, userId) {
+    try {
+        console.log('🆕 Creating new subscription in Supabase:', {
+            stripe_subscription_id: stripeSubscription.id,
+            stripe_customer_id: stripeSubscription.customer,
+            status: stripeSubscription.status,
+        });
+
+        if (!userId) {
+            userId =
+                stripeSubscription.metadata?.userId ||
+                stripeSubscription.metadata?.supabase_user_id ||
+                null;
+        }
+
+        if (!userId) {
+            userId = await getUserIdFromStripeCustomer(stripeSubscription.customer);
+            if (!userId) {
+                throw new Error('user_id not found when creating subscription');
+            }
+        }
+
+        const priceItem = stripeSubscription.items?.data?.[0];
+        let planName = 'monthly';
+        if (priceItem?.price?.nickname) {
+            planName = priceItem.price.nickname;
+        } else if (priceItem?.price?.recurring?.interval) {
+            planName = priceItem.price.recurring.interval;
+        }
+
+        const addDays = (date, days) => {
+            const result = new Date(date);
+            result.setDate(result.getDate() + days);
+            return result;
+        };
+
+        const periodStartSec =
+            stripeSubscription.current_period_start ??
+            stripeSubscription.items?.data?.[0]?.current_period_start ??
+            stripeSubscription.start_date ??
+            Math.floor(Date.now() / 1000);
+
+        const periodEndSec =
+            stripeSubscription.current_period_end ??
+            stripeSubscription.items?.data?.[0]?.current_period_end ??
+            stripeSubscription.trial_end ??
+            null;
+
+        const startDate = toUtcMinus3Date(periodStartSec);
+        const startDateIso = startDate.toISOString();
+
+        let endDate = periodEndSec ? toUtcMinus3Date(periodEndSec) : null;
+        if (!endDate || endDate.getTime() <= startDate.getTime()) {
+            endDate = addDays(startDate, 1);
+        }
+        const endDateIso = endDate.toISOString();
+
+        const subscriptionData = {
+            user_id: userId,
+            stripe_customer_id: stripeSubscription.customer,
+            stripe_subscription_id: stripeSubscription.id,
+            status: stripeSubscription.status || 'active',
+            plan_name: planName,
+            start_date: startDate,
+            end_date: endDate,
+            canceled_date: null,
+        };
+
+        console.log('📦 Datos a guardar:', {
+            ...subscriptionData,
+            start_date: startDateIso,
+            end_date: endDateIso,
+        });
+
+        const { data, error } = await supabase
+            .from('subscriptions')
+            .insert(subscriptionData)
+            .select()
+            .single();
+
+        if (error) {
+            console.error('❌ Error creating subscription:', error);
+            throw error;
+        }
+
+        console.log('✅ Subscription created:', {
+            id: data.id,
+            start_date: data.start_date,
+            end_date: data.end_date,
+            status: data.status,
+        });
+
+        return data;
+    } catch (error) {
+        console.error('createSubscription error:', error);
+        throw error;
+    }
+}
+
+
 /**
- * Crea o actualiza una suscripción en Supabase desde Stripe
+ * actualiza una suscripción en Supabase desde Stripe
  * ✅ VERSIÓN MEJORADA: Siempre obtiene datos completos desde Stripe API
  */
 export async function upsertSubscription(stripeSubscription, userId = null) {
@@ -56,14 +163,19 @@ export async function upsertSubscription(stripeSubscription, userId = null) {
             fullSubscription = await stripe.subscriptions.retrieve(stripeSubscription.id);
             console.log('✅ Suscripción completa obtenida');
             console.log('📅 Status:', fullSubscription.status);
-            console.log('📅 current_period_start:', fullSubscription.current_period_start);
-            console.log('📅 current_period_end:', fullSubscription.current_period_end);
         } catch (retrieveError) {
             console.error('⚠️ Error retrieving subscription:', retrieveError);
             fullSubscription = stripeSubscription;
         }
 
         // Obtener userId
+        if (!userId) {
+            userId =
+                fullSubscription.metadata?.userId ||
+                fullSubscription.metadata?.supabase_user_id ||
+                null;
+        }
+
         if (!userId) {
             userId = await getUserIdFromStripeCustomer(fullSubscription.customer);
             if (!userId) {
@@ -86,64 +198,43 @@ export async function upsertSubscription(stripeSubscription, userId = null) {
             planName = priceItem.price.recurring.interval;
         }
 
-        // Calcular fechas
-        const startDate = fullSubscription.current_period_start
-            ? new Date(fullSubscription.current_period_start * 1000)
-            : fullSubscription.start_date
-                ? new Date(fullSubscription.start_date * 1000)
-                : new Date(fullSubscription.created * 1000);
+        const addDays = (date, days) => {
+            const result = new Date(date);
+            result.setDate(result.getDate() + days);
+            return result;
+        };
 
-        let endDate = null;
+        const periodStartSec =
+            fullSubscription.current_period_start ??
+            fullSubscription.items?.data?.[0]?.current_period_start ??
+            fullSubscription.start_date ??
+            Math.floor(Date.now() / 1000);
 
-        // Intentar obtener end_date de múltiples fuentes
-        if (fullSubscription.current_period_end) {
-            endDate = new Date(fullSubscription.current_period_end * 1000);
-        } else if (fullSubscription.trial_end) {
-            endDate = new Date(fullSubscription.trial_end * 1000);
-        } else if (fullSubscription.billing_cycle_anchor && priceItem?.price?.recurring) {
-            const interval = priceItem.price.recurring.interval;
-            const intervalCount = priceItem.price.recurring.interval_count || 1;
+        const periodEndSec =
+            fullSubscription.current_period_end ??
+            fullSubscription.items?.data?.[0]?.current_period_end ??
+            fullSubscription.trial_end ??
+            null;
 
-            endDate = new Date(fullSubscription.billing_cycle_anchor * 1000);
-
-            if (interval === 'month') {
-                endDate.setMonth(endDate.getMonth() + intervalCount);
-            } else if (interval === 'year') {
-                endDate.setFullYear(endDate.getFullYear() + intervalCount);
-            } else if (interval === 'week') {
-                endDate.setDate(endDate.getDate() + (7 * intervalCount));
-            } else if (interval === 'day') {
-                endDate.setDate(endDate.getDate() + intervalCount);
-            }
-        } else {
-            // Fallback final
-            const interval = priceItem?.price?.recurring?.interval || 'month';
-            const intervalCount = priceItem?.price?.recurring?.interval_count || 1;
-
-            endDate = new Date(startDate);
-
-            if (interval === 'month') {
-                endDate.setMonth(endDate.getMonth() + intervalCount);
-            } else if (interval === 'year') {
-                endDate.setFullYear(endDate.getFullYear() + intervalCount);
-            } else if (interval === 'week') {
-                endDate.setDate(endDate.getDate() + (7 * intervalCount));
-            } else if (interval === 'day') {
-                endDate.setDate(endDate.getDate() + intervalCount);
-            }
+        const baseStartDate = toUtcMinus3Date(periodStartSec);
+        let baseEndDate = periodEndSec ? toUtcMinus3Date(periodEndSec) : null;
+        console.log('📅 Calculated dates:', {
+            start_date: baseStartDate,
+            end_date: baseEndDate
+        });
+        if (!baseEndDate || baseEndDate.getTime() <= baseStartDate.getTime()) {
+            baseEndDate = addDays(baseStartDate, 1);
         }
 
         const subscriptionData = {
             user_id: userId,
             stripe_customer_id: fullSubscription.customer,
             stripe_subscription_id: fullSubscription.id,
-            status: fullSubscription.status,
+            status: fullSubscription.status || 'active',
             plan_name: planName,
-            start_date: startDate,
-            end_date: endDate,
-            canceled_date: fullSubscription.canceled_at
-                ? new Date(fullSubscription.canceled_at * 1000)
-                : null
+            start_date: baseStartDate,
+            end_date: baseEndDate,
+            canceled_date: null
         };
 
         console.log('📦 Datos a guardar:', {
@@ -153,44 +244,86 @@ export async function upsertSubscription(stripeSubscription, userId = null) {
             canceled_date: subscriptionData.canceled_date?.toISOString() || 'null',
         });
 
-        // Buscar si ya existe
-        const { data: existingSubscription, error: existingStripeError } = await supabase
+        const { data: activeSubscription, error: activeByUserError } = await supabase
             .from('subscriptions')
-            .select('id, status')
-            .eq('stripe_subscription_id', fullSubscription.id)
+            .select('*')
+            .eq('user_id', userId)
+            .eq('status', 'active')
+            .order('start_date', { ascending: false })
+            .limit(1)
             .maybeSingle();
 
-        if (existingStripeError && existingStripeError.code !== 'PGRST116') {
-            console.error('⚠️  Error finding subscription:', existingStripeError);
-        } else if (existingSubscription) {
-            console.log('📝 Actualizando suscripción existente');
-            subscriptionData.id = existingSubscription.id;
-        } else {
-            console.log('🆕 Creando nueva suscripción');
+        if (activeByUserError && activeByUserError.code !== 'PGRST116') {
+            console.error('⚠️  Error finding active subscription by user:', activeByUserError);
         }
 
-        // Guardar
-        const { data, error } = await supabase
+        if (activeSubscription) {
+            const activeEndDate = activeSubscription.end_date
+                ? new Date(activeSubscription.end_date)
+                : addDays(
+                    activeSubscription.start_date
+                        ? new Date(activeSubscription.start_date)
+                        : new Date(),
+                    1
+                );
+
+            const { error: markActiveCompletedError } = await supabase
+                .from('subscriptions')
+                .update({
+                    status: 'completed',
+                    end_date: activeEndDate
+                })
+                .eq('id', activeSubscription.id);
+
+            if (markActiveCompletedError) {
+                console.error('❌ Error marcando suscripción activa como completada:', markActiveCompletedError);
+                throw markActiveCompletedError;
+            }
+        }
+
+        const nextSubscriptionData = {
+            ...subscriptionData,
+            status: fullSubscription.status || 'active'
+        };
+
+        const { data: duplicateCheck } = await supabase
             .from('subscriptions')
-            .upsert(subscriptionData, { onConflict: 'stripe_subscription_id,start_date' })
-            .select()
-            .single();
+            .select('*')
+            .eq('stripe_subscription_id', fullSubscription.id)
+            .eq('start_date', nextSubscriptionData.start_date.toISOString())
+            .maybeSingle();
 
-        if (error) {
-            console.error('❌ Error upserting subscription:', error);
-            throw error;
+        let resultSubscription = null;
+
+        if (duplicateCheck) {
+            console.warn('⚠️ Periodo ya creado anteriormente. Reutilizando registro existente.');
+            resultSubscription = duplicateCheck;
+        } else {
+            const { data: inserted, error: insertRenewedError } = await supabase
+                .from('subscriptions')
+                .insert(nextSubscriptionData)
+                .select()
+                .single();
+
+            if (insertRenewedError) {
+                console.error('❌ Error creando nuevo periodo de suscripción:', insertRenewedError);
+                throw insertRenewedError;
+            }
+
+            resultSubscription = inserted;
         }
 
-        console.log('✅ Subscription upserted:', {
-            id: data.id,
-            status: data.status,
-            end_date: data.end_date
+        console.log('✅ Subscription processed:', {
+            id: resultSubscription.id,
+            status: resultSubscription.status,
+            start_date: resultSubscription.start_date,
+            end_date: resultSubscription.end_date
         });
 
         // ❌ ELIMINADO: Ya NO marca otras suscripciones como canceladas automáticamente
         // Esto solo debe ocurrir cuando Stripe envíe el evento de cancelación
 
-        return data;
+        return resultSubscription;
     } catch (error) {
         console.error('upsertSubscription error:', error);
         throw error;
@@ -430,118 +563,6 @@ export async function resetMessageCounter(userId) {
  * Procesa la renovación de una suscripción
  * Marca el período anterior como completado y crea un nuevo registro
  */
-export async function handleSubscriptionRenewal(stripeSubscription, subscriptionId, periodStartSec = null, periodEndSec = null) {
-    try {
-        console.log(`🔄 Forzando renovación de suscripción ${subscriptionId}`);
-
-        // Calcular periodos
-        const newPeriodStart = periodStartSec
-            ? new Date(periodStartSec * 1000)
-            : stripeSubscription.current_period_start
-                ? new Date(stripeSubscription.current_period_start * 1000)
-                : null;
-
-        const newPeriodEnd = periodEndSec
-            ? new Date(periodEndSec * 1000)
-            : stripeSubscription.current_period_end
-                ? new Date(stripeSubscription.current_period_end * 1000)
-                : null;
-
-        if (newPeriodStart) console.log(`   - newPeriodStart: ${newPeriodStart.toISOString()}`);
-        if (newPeriodEnd) console.log(`   - newPeriodEnd: ${newPeriodEnd.toISOString()}`);
-
-        // Obtener suscripción existente
-        const { data: existingSub } = await supabase
-            .from('subscriptions')
-            .select('id, user_id, status, end_date')
-            .eq('stripe_subscription_id', subscriptionId)
-            .eq('status', 'active')
-            .maybeSingle();
-
-        if (existingSub) {
-            console.log(`🧾 Suscripción activa existente encontrada (id: ${existingSub.id}). Cancelando...`);
-
-            // 1️⃣ Marcar la anterior como completada o cancelada
-            const { error: updateError } = await supabase
-                .from('subscriptions')
-                .update({
-                    status: 'completed',
-                    end_date: newPeriodStart || new Date()
-                })
-                .eq('id', existingSub.id);
-
-            if (updateError) {
-                console.error('❌ Error al cancelar suscripción previa:', updateError);
-                throw updateError;
-            }
-
-            console.log('✅ Suscripción anterior marcada como completada');
-        } else {
-            console.log('ℹ️ No había suscripción activa previa');
-        }
-
-        // 2️⃣ Crear nuevo registro (siempre)
-        let userId = existingSub?.user_id;
-        if (!userId) {
-            userId = await getUserIdFromStripeCustomer(stripeSubscription.customer);
-            if (!userId) userId = await findUserByStripeCustomerId(stripeSubscription.customer);
-        }
-
-        if (!userId) {
-            console.error('❌ No se pudo obtener userId para la renovación');
-            throw new Error('userId not found for subscription renewal');
-        }
-
-        const priceItem = stripeSubscription.items?.data?.[0];
-        let planName = 'monthly';
-        if (priceItem?.price?.nickname) {
-            planName = priceItem.price.nickname;
-        } else if (priceItem?.price?.recurring?.interval) {
-            planName = priceItem.price.recurring.interval;
-        }
-
-        const newSubscriptionData = {
-            user_id: userId,
-            stripe_customer_id: stripeSubscription.customer,
-            stripe_subscription_id: stripeSubscription.id,
-            status: stripeSubscription.status || 'active',
-            plan_name: planName,
-            start_date: newPeriodStart || new Date(),
-            end_date: newPeriodEnd || null,
-            canceled_date: null
-        };
-
-        console.log('🆕 Creando nueva suscripción con datos:', newSubscriptionData);
-
-        const { data: newSub, error: insertError } = await supabase
-            .from('subscriptions')
-            .insert(newSubscriptionData)
-            .select()
-            .single();
-
-        if (insertError) {
-            console.error('❌ Error creando nueva suscripción:', insertError);
-            throw insertError;
-        }
-
-        console.log('✅ Nueva suscripción creada:', {
-            id: newSub.id,
-            start_date: newSub.start_date,
-            end_date: newSub.end_date,
-            status: newSub.status
-        });
-
-        await resetMessageCounter(userId);
-
-        return { renewed: true, subscription: newSub, userId };
-
-    } catch (error) {
-        console.error('❌ Error en handleSubscriptionRenewal (forzada):', error);
-        throw error;
-    }
-}
-
-
 /**
  * Sincroniza suscripciones activas desde Stripe (útil para catch-up si webhooks fallan)
  * Actualiza end_date y status basándose en datos de Stripe
